@@ -1,0 +1,61 @@
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test files
+test-*.json
+*.test.py
+tests/
+
+# Documentation (not needed in container)
+*.md
+LICENSE
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+docker-build-test.ps1
+docker-deploy-azure.ps1
+
+# Infrastructure
+infrastructure/
+*.bicep
+*.bicepparam
+
+# Temp files and local development
+temp/
+*.tmp
+*.log
+local_mock.py
+local_mock_temp.txt
+local_storage/*
+!local_storage/.gitkeep
+
+# Environment files
+.env
+.env.local
+.env.example
+
+# OS files
+Thumbs.db
+.DS_Store

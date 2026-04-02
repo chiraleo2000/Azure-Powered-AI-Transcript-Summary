@@ -1,0 +1,52 @@
+# Core web framework
+gradio>=4.0.0
+
+# Azure Services
+azure-storage-blob>=12.19.0
+azure-cognitiveservices-vision-computervision>=0.9.0
+azure-keyvault-secrets>=4.7.0
+azure-identity>=1.15.0
+msrest>=0.7.1
+
+# Environment and configuration
+python-dotenv>=1.0.0
+
+# Audio/Video Processing (FFmpeg Python wrapper)
+ffmpeg-python==0.2.0
+
+# AI and Machine Learning
+openai>=1.3.0
+tiktoken>=0.5.0
+numpy>=1.24.0
+
+# Document processing
+PyPDF2>=3.0.1
+python-docx>=1.1.0
+openpyxl>=3.1.2
+pandas>=2.0.0
+python-pptx>=0.6.21
+striprtf>=0.0.26
+chardet>=5.2.0
+
+# Image and Computer Vision
+opencv-python>=4.8.0
+Pillow>=10.0.0
+scikit-image>=0.21.0
+
+# HTTP requests
+requests>=2.31.0
+
+# Data processing and utilities
+dataclasses-json>=0.6.0
+typing-extensions>=4.8.0
+
+# Optional but recommended for better performance
+# Uncomment if you want faster processing
+# torch>=2.0.0
+# transformers>=4.30.0
+# accelerate>=0.20.0
+
+# Development dependencies (optional)
+# pytest>=7.4.0
+# black>=23.7.0
+# flake8>=6.0.0

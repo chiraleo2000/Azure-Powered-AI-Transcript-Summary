@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "southeastasia"
+    },
+    "environment": {
+      "value": "prod"
+    },
+    "storageAccountName": {
+      "value": "aisummarymeetingstorage"
+    },
+    "keyVaultName": {
+      "value": "ai-summary-keyvault"
+    },
+    "appServiceName": {
+      "value": "ai-summarize-service"
+    },
+    "updateAppService": {
+      "value": true
+    },
+    "useDocker": {
+      "value": false
+    },
+    "dockerImage": {
+      "value": ""
+    }
+  }
+}

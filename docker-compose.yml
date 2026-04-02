@@ -1,0 +1,46 @@
+services:
+  ai-summary-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-summary-app:latest
+    container_name: ai-summary-app
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    environment:
+      # Override Key Vault setting for local development
+      USE_KEY_VAULT: "False"
+      LOCAL_TESTING_MODE: "False"
+      
+    volumes:
+      # Mount local storage for persistence
+      - ./local_storage:/app/local_storage
+      
+      # Mount source code for development (optional - comment out for production-like testing)
+      # - ./app.py:/app/app.py
+      # - ./backend.py:/app/backend.py
+      # - ./ai_summary.py:/app/ai_summary.py
+      # - ./file_processors.py:/app/file_processors.py
+      # - ./session_manager.py:/app/session_manager.py
+      # - ./image_extraction.py:/app/image_extraction.py
+      # - ./error_logger.py:/app/error_logger.py
+      # - ./config.py:/app/config.py
+      # - ./azure_keyvault_client.py:/app/azure_keyvault_client.py
+      
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    networks:
+      - ai-summary-network
+
+networks:
+  ai-summary-network:
+    driver: bridge
