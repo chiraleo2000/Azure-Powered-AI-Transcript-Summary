@@ -16,7 +16,6 @@ BANGKOK_TZ = timezone(timedelta(hours=7))
 MSG_LOGIN_STATS = "👤 Please log in to view your statistics..."
 MSG_LOGIN_REQUIRED = "👤 Please log in to view statistics"
 MSG_AUTO_REFRESH = "🔄 Auto-refresh active"
-METHOD_LLM = "🤖 LLM"
 
 # Shared regex patterns
 RE_CLEAN_SPECIAL = r'[^\w\s-]'
@@ -74,7 +73,6 @@ def format_status(status):
     status_map = {
         'pending': '⏳ Queued',
         'processing': '🔄 Processing',
-        'processing_gpt4o': '🤖 LLM Processing',
         'completed': '✅ Done',
         'failed': '❌ Failed'
     }
@@ -220,78 +218,59 @@ def logout_user():
     print("👋 User logged out")
     return None, "👋 You have been logged out. Please log in to continue.", gr.update(visible=True), gr.update(visible=False), MSG_LOGIN_STATS
 
+
+# --- Shared tuple builders to reduce cognitive complexity ---
+
+def _error_result(msg):
+    """Build a standard 8-tuple error result for transcription handlers."""
+    return (msg, "", gr.update(value=""), gr.update(visible=False), "", {}, gr.update(value=""), gr.update())
+
+
+def _status_result(msg, info="", refresh_html=""):
+    """Build a standard 7-tuple status result for job-status handlers."""
+    return (
+        msg, "",
+        gr.update(value=""), gr.update(visible=False),
+        info,
+        gr.update(value=_refresh_html(refresh_html) if refresh_html else ""),
+        gr.update()
+    )
+
+
+def _read_upload_file(file):
+    """Read uploaded file bytes and filename. Returns (file_bytes, filename) or raises ValueError."""
+    if isinstance(file, str):
+        if not os.path.exists(file):
+            raise ValueError("File not found. Please try uploading again.")
+        with open(file, 'rb') as f:
+            return f.read(), os.path.basename(file)
+    file_path = str(file)
+    if not os.path.exists(file_path):
+        raise ValueError("Unable to process file. Please try again.")
+    with open(file_path, 'rb') as f:
+        return f.read(), os.path.basename(file_path)
+
+
 # Transcription Functions
 def submit_transcription(file, language, audio_format, diarization_enabled, speakers, 
                         profanity, punctuation, timestamps, lexical, audio_processing, 
-                        llm_correction, user, session_token=None):
-    """Submit transcription job with optional LLM correction for improved accuracy"""
+                        user, session_token=None):
+    """Submit transcription job to Azure Speech Service"""
     user = _ensure_user(user, session_token)
     if not user:
-        return (
-            "❌ Please log in to submit transcriptions",
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            "",
-            {},
-            gr.update(value=""),
-            gr.update()
-        )
+        return _error_result("❌ Please log in to submit transcriptions")
     
     if file is None:
-        return (
-            "Please upload an audio or video file first.",
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            "",
-            {},
-            gr.update(value=""),
-            gr.update()
-        )
+        return _error_result("Please upload an audio or video file first.")
     
     try:
         # Get file data
         try:
-            if isinstance(file, str):
-                if os.path.exists(file):
-                    with open(file, 'rb') as f:
-                        file_bytes = f.read()
-                    original_filename = os.path.basename(file)
-                else:
-                    return (
-                        "File not found. Please try uploading again.",
-                        "",
-                        gr.update(value=""), gr.update(visible=False),
-                        "",
-                        {},
-                        gr.update(value=""),
-                        gr.update()
-                    )
-            else:
-                file_path = str(file)
-                if os.path.exists(file_path):
-                    with open(file_path, 'rb') as f:
-                        file_bytes = f.read()
-                    original_filename = os.path.basename(file_path)
-                else:
-                    return (
-                        "Unable to process file. Please try again.",
-                        "",
-                        gr.update(value=""), gr.update(visible=False),
-                        "",
-                        {},
-                        gr.update(value=""),
-                        gr.update()
-                    )
+            file_bytes, original_filename = _read_upload_file(file)
+        except ValueError as e:
+            return _error_result(str(e))
         except Exception as e:
-            return (
-                f"Error reading file: {str(e)}",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                "",
-                {},
-                gr.update(value=""),
-                gr.update()
-            )
+            return _error_result(f"Error reading file: {str(e)}")
         
         # Validate file
         file_extension = original_filename.split('.')[-1].lower() if '.' in original_filename else ""
@@ -301,55 +280,13 @@ def submit_transcription(file, language, audio_format, diarization_enabled, spea
         }
         
         if file_extension not in supported_extensions and file_extension != "":
-            return (
-                f"Unsupported file format: .{file_extension}",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                "",
-                {},
-                gr.update(value=""),
-                gr.update()
-            )
+            return _error_result(f"Unsupported file format: .{file_extension}")
         
         # Basic file size check
         if len(file_bytes) > 500 * 1024 * 1024:  # 500MB limit
-            return (
-                "File too large. Please upload files smaller than 500MB.",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                "",
-                {},
-                gr.update(value=""),
-                gr.update()
-            )
+            return _error_result("File too large. Please upload files smaller than 500MB.")
         
-        # LLM Transcription: enforce 25MB limit and audio-only
-        if bool(llm_correction):
-            audio_extensions = {'wav', 'mp3', 'ogg', 'opus', 'flac', 'wma', 'aac', 'm4a', 'amr', 'speex', 'webm'}
-            if file_extension not in audio_extensions:
-                return (
-                    f"❌ LLM Transcription only supports audio files.\nUnsupported: .{file_extension}\nSupported: WAV, MP3, OGG, M4A, FLAC, AAC, etc.\nPlease uncheck '🤖 LLM Transcription' to use standard transcription for video files.",
-                    "",
-                    gr.update(value=""), gr.update(visible=False),
-                    "",
-                    {},
-                    gr.update(value=""),
-                    gr.update()
-                )
-            max_llm_size = 25 * 1024 * 1024  # 25MB
-            if len(file_bytes) > max_llm_size:
-                file_size_mb = len(file_bytes) / 1024 / 1024
-                return (
-                    f"❌ File too large for LLM Transcription: {file_size_mb:.1f}MB\nMaximum size: 25MB\nPlease uncheck '🤖 LLM Transcription' to use standard transcription for larger files.",
-                    "",
-                    gr.update(value=""), gr.update(visible=False),
-                    "",
-                    {},
-                    gr.update(value=""),
-                    gr.update()
-                )
-        
-        # Prepare settings with LLM correction option
+        # Prepare settings
         settings = {
             'audio_format': audio_format,
             'diarization_enabled': bool(diarization_enabled),
@@ -358,14 +295,12 @@ def submit_transcription(file, language, audio_format, diarization_enabled, spea
             'punctuation': punctuation,
             'timestamps': bool(timestamps),
             'lexical': bool(lexical),
-            'audio_processing': audio_processing,
-            'llm_correction': bool(llm_correction)  # NEW: LLM correction flag
+            'audio_processing': audio_processing
         }
 
         
         print(f"🎙️ Submitting transcription with settings: {settings}")
         print(f"   - Diarization: {diarization_enabled}")
-        print(f"   - LLM Correction: {llm_correction}")
         
         # Submit job
         job_id = transcription_manager.submit_transcription(
@@ -377,18 +312,14 @@ def submit_transcription(file, language, audio_format, diarization_enabled, spea
             'current_job_id': job_id,
             'start_time': datetime.now().isoformat(),
             'auto_refresh_active': True,
-            'last_status': 'pending',
-            'llm_correction_requested': bool(llm_correction)
+            'last_status': 'pending'
         }
         
         # Get updated user stats
         stats_display = get_user_stats_display(user)
         
-        # Build status message
-        correction_note = "\n🤖 LLM correction enabled (improved accuracy)" if llm_correction else ""
-        
         return (
-            f"🚀 Transcription started for: {original_filename}{correction_note}\n📡 Auto-refreshing every 10 seconds...",
+            f"🚀 Transcription started for: {original_filename}\n📡 Auto-refreshing every 10 seconds...",
             "",
             gr.update(value=""), gr.update(visible=False),
             f"Job ID: {job_id}",
@@ -399,153 +330,111 @@ def submit_transcription(file, language, audio_format, diarization_enabled, spea
         
     except Exception as e:
         print(f"❌ Error submitting transcription: {str(e)}")
-        return (
-            f"Error: {str(e)}",
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            "",
-            {},
-            gr.update(value=""),
-            gr.update()
-        )
+        return _error_result(f"Error: {str(e)}")
+
+def _build_completed_result(job, job_id, processing_time, user, stats_display):
+    """Build result tuple for a completed transcription job."""
+    try:
+        transcript_file = create_transcript_file(job.transcript_text, job_id)
+        print(f"✅ [{user.username}] Transcription ready: {len(job.transcript_text)} characters")
+    except Exception as e:
+        print(f"⚠️ [{user.username}] Error creating transcript file: {str(e)}")
+        transcript_file = None
+    
+    return (
+        f"✅ Transcription completed in {processing_time}",
+        job.transcript_text,
+        gr.update(value=_download_info_html(transcript_file) if transcript_file else ""),
+        gr.update(visible=True, value=transcript_file) if transcript_file else gr.update(visible=False),
+        f"Processed: {job.original_filename}",
+        gr.update(value=""),
+        stats_display
+    )
+
+
+def _build_in_progress_result(status_msg, info, processing_time, stats_display):
+    """Build result tuple for an in-progress job."""
+    return (
+        f"{status_msg} ({processing_time} elapsed)\n📡 Auto-refreshing every 10 seconds...",
+        "",
+        gr.update(value=""), gr.update(visible=False),
+        info,
+        gr.update(value=_refresh_html(MSG_AUTO_REFRESH)),
+        stats_display
+    )
+
+
+def _build_failed_result(error_message, processing_time, stats_display):
+    """Build result tuple for a failed job."""
+    error_msg = error_message[:100] + "..." if error_message and len(error_message) > 100 else error_message or "Unknown error"
+    return (
+        f"❌ Transcription failed after {processing_time}",
+        "",
+        gr.update(value=""), gr.update(visible=False),
+        f"Error: {error_msg}",
+        gr.update(value=""),
+        stats_display
+    )
+
+
+def _build_pending_result(job, processing_time, stats_display):
+    """Build result tuple for a pending/queued job."""
+    return (
+        f"⏳ Queued for processing... ({processing_time} waiting)\n📡 Auto-refreshing every 10 seconds...",
+        "",
+        gr.update(value=""), gr.update(visible=False),
+        f"Waiting: {job.original_filename}",
+        gr.update(value=_refresh_html(MSG_AUTO_REFRESH)),
+        stats_display
+    )
+
+
+def _dispatch_job_status(job, job_id, processing_time, user, stats_display):
+    """Dispatch job status to the appropriate result builder."""
+    if job.status == 'completed' and job.transcript_text and job.transcript_text.strip():
+        return _build_completed_result(job, job_id, processing_time, user, stats_display)
+
+    if job.status == 'failed':
+        return _build_failed_result(job.error_message, processing_time, stats_display)
+
+    if job.status == 'processing':
+        return _build_in_progress_result("🔄 Processing...", f"Converting and analyzing: {job.original_filename}", processing_time, stats_display)
+
+    if job.status == 'completed':
+        return _build_in_progress_result("🔄 Finalizing transcript...", f"Retrieving results: {job.original_filename}", processing_time, stats_display)
+
+    return _build_pending_result(job, processing_time, stats_display)
+
 
 def check_current_job_status(job_state, user, session_token=None):
     """Check status of current job with improved transcript handling"""
     user = _ensure_user(user, session_token)
     if not user:
-        return (
-            "❌ Please log in to check status", 
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            "",
-            gr.update(value=""),
-            gr.update()
-        )
+        return _status_result("❌ Please log in to check status")
     
     if not job_state or 'current_job_id' not in job_state:
-        return (
-            "No active job", 
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            "",
-            gr.update(value=""),
-            gr.update()
-        )
+        return _status_result("No active job")
     
     job_id = job_state['current_job_id']
     
     try:
         job = transcription_manager.get_job_status(job_id)
         if not job or job.user_id != user.user_id:
-            return (
-                "Job not found or access denied", 
-                "", 
-                gr.update(value=""), gr.update(visible=False), 
-                "",
-                gr.update(value=""),
-                gr.update()
-            )
+            return _status_result("Job not found or access denied")
         
-        # Calculate processing time
         processing_time = format_processing_time(job.created_at, job.completed_at)
         
-        # Enhanced status change logging
         last_status = job_state.get('last_status', '')
         if job.status != last_status:
             print(f"🔄 [{user.username}] Job status change: {last_status} → {job.status} ({job.original_filename})")
             job_state['last_status'] = job.status
         
-        # Get updated user stats
         stats_display = get_user_stats_display(user)
-        
-        # Handle completed status with better transcript detection
-        if job.status == 'completed' and job.transcript_text and job.transcript_text.strip():
-            # Job is complete and transcript is available
-            
-            # Create downloadable file
-            try:
-                transcript_file = create_transcript_file(job.transcript_text, job_id)
-                print(f"✅ [{user.username}] Transcription ready: {len(job.transcript_text)} characters")
-            except Exception as e:
-                print(f"⚠️ [{user.username}] Error creating transcript file: {str(e)}")
-                transcript_file = None
-            
-            return (
-                f"✅ Transcription completed in {processing_time}",
-                job.transcript_text,
-                gr.update(value=_download_info_html(transcript_file) if transcript_file else ""),
-                gr.update(visible=True, value=transcript_file) if transcript_file else gr.update(visible=False),
-                f"Processed: {job.original_filename}",
-                gr.update(value=""),  # Hide auto-refresh status
-                stats_display
-            )
-        
-        elif job.status == 'failed':
-            # Job failed
-            error_msg = job.error_message[:100] + "..." if job.error_message and len(job.error_message) > 100 else job.error_message or "Unknown error"
-            return (
-                f"❌ Transcription failed after {processing_time}",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                f"Error: {error_msg}",
-                gr.update(value=""),  # Hide auto-refresh status
-                stats_display
-            )
-        
-        elif job.status == 'processing':
-            # Still processing with Azure STT
-            return (
-                f"🔄 Processing... ({processing_time} elapsed)\n📡 Auto-refreshing every 10 seconds...",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                f"Converting and analyzing: {job.original_filename}",
-                gr.update(value=_refresh_html(MSG_AUTO_REFRESH)),
-                stats_display
-            )
-        
-        elif job.status == 'processing_gpt4o':
-            # GPT-4o LLM transcription in progress
-            return (
-                f"🤖 LLM Transcription in progress... ({processing_time} elapsed)\n📡 Auto-refreshing every 10 seconds...",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                f"GPT-4o processing: {job.original_filename}",
-                gr.update(value=_refresh_html("🤖 LLM Auto-refresh active")),
-                stats_display
-            )
-        
-        elif job.status == 'completed' and (not job.transcript_text or not job.transcript_text.strip()):
-            # Job marked as completed but transcript not yet available - keep refreshing
-            return (
-                f"🔄 Finalizing transcript... ({processing_time} elapsed)\n📡 Auto-refreshing every 10 seconds...",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                f"Retrieving results: {job.original_filename}",
-                gr.update(value=_refresh_html(MSG_AUTO_REFRESH)),
-                stats_display
-            )
-        
-        else:  # pending
-            # Still pending
-            return (
-                f"⏳ Queued for processing... ({processing_time} waiting)\n📡 Auto-refreshing every 10 seconds...",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                f"Waiting: {job.original_filename}",
-                gr.update(value=_refresh_html(MSG_AUTO_REFRESH)),
-                stats_display
-            )
+        return _dispatch_job_status(job, job_id, processing_time, user, stats_display)
         
     except Exception as e:
         print(f"❌ Error checking job status: {str(e)}")
-        return (
-            f"Error checking status: {str(e)}", 
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            "",
-            gr.update(value=""),
-            gr.update()
-        )
+        return _status_result(f"Error checking status: {str(e)}")
 
 
 # AI Summary Functions (continued in next artifact due to length)
@@ -635,264 +524,207 @@ def show_media_preview(file_path):
     else:
         return "<p style='text-align:center;color:#01579B;'>ไม่สามารถแสดงตัวอย่างไฟล์นี้ได้</p>"
 
+def _handle_transcription_wait(summary_job_state, user, processing_time):
+    """Handle the transcription-waiting phase of AI summary status check."""
+    transcription_job_id = summary_job_state.get('transcription_job_id')
+    if not transcription_job_id:
+        return _status_result("❌ Error: Missing transcription job ID")
+    
+    transcription_job = transcription_manager.get_job_status(transcription_job_id)
+    if not transcription_job:
+        return _status_result("❌ Transcription job not found")
+    
+    stats = get_user_stats_display(user)
+    
+    if transcription_job.status == 'pending':
+        return (
+            f"⏳ Transcription queued... ({processing_time} elapsed)\n📡 Auto-refreshing every 10 seconds...",
+            "", gr.update(value=""), gr.update(visible=False),
+            f"Transcription: {transcription_job.original_filename}",
+            gr.update(value=_refresh_html("🔄 Waiting for transcription")), stats
+        )
+    
+    if transcription_job.status == 'processing':
+        transcription_time = format_processing_time(transcription_job.created_at)
+        return (
+            f"🎙️ Transcribing... ({transcription_time} transcribing, {processing_time} total)\n📡 Auto-refreshing every 10 seconds...",
+            "", gr.update(value=""), gr.update(visible=False),
+            f"Transcribing: {transcription_job.original_filename}",
+            gr.update(value=_refresh_html("🔄 Transcription in progress")), stats
+        )
+    
+    if transcription_job.status == 'failed':
+        return (
+            f"❌ Transcription failed - Cannot proceed\nError: {transcription_job.error_message or 'Unknown error'}",
+            "", gr.update(value=""), gr.update(visible=False),
+            f"Failed: {transcription_job.original_filename}",
+            gr.update(value=""), stats
+        )
+    
+    if transcription_job.status == 'completed':
+        return _handle_transcription_completed(summary_job_state, transcription_job, transcription_job_id, processing_time, stats)
+    
+    return _status_result("Unknown transcription status")
+
+
+def _handle_transcription_completed(summary_job_state, transcription_job, transcription_job_id, processing_time, stats):
+    """Handle the case where transcription just completed — trigger AI summary."""
+    if not transcription_job.transcript_text or not transcription_job.transcript_text.strip():
+        return (
+            f"🔄 Transcription completed, retrieving text... ({processing_time} elapsed)\n📡 Auto-refreshing every 10 seconds...",
+            "", gr.update(value=""), gr.update(value=""), gr.update(visible=False),
+            f"Getting transcript: {transcription_job.original_filename}",
+            gr.update(value=_refresh_html("🔄 Getting transcript")), stats
+        )
+    
+    print("✅ Transcription completed, triggering AI summary immediately...")
+    
+    try:
+        transcript_ids = summary_job_state.get('existing_transcripts', [])
+        transcript_ids.append(transcription_job_id)
+        
+        settings = {
+            'content_mode': "New Audio/Video Files",
+            'format': summary_job_state.get('summary_format', 'บทสรุปผู้บริหาร'),
+            'output_language': summary_job_state.get('output_language', 'Thai'),
+            'focus_areas': summary_job_state.get('focus_areas', ''),
+            'include_timestamps': summary_job_state.get('include_timestamps', True),
+            'include_action_items': summary_job_state.get('include_action_items', True),
+            'language': "th-TH"
+        }
+        
+        job_id = ai_summary_manager.submit_summary_job_enhanced(
+            user_id=summary_job_state['user_id'],
+            content_mode="New Audio/Video Files",
+            summary_type=summary_job_state.get('summary_format', 'บทสรุปผู้บริหาร'),
+            user_prompt=summary_job_state.get('ai_instructions', ''),
+            existing_transcript_ids=transcript_ids,
+            audio_video_files=[],
+            document_files=summary_job_state.get('document_image_files', []),
+            settings=settings
+        )
+        
+        print(f"🤖 AI Summary job created immediately: {job_id}")
+        
+        summary_job_state.update({
+            'waiting_for_transcription': False,
+            'current_summary_job_id': job_id,
+            'transcription_completed_at': datetime.now().isoformat(),
+            'last_status': 'ai_started'
+        })
+        
+        return (
+            f"✅ Transcription done! 🤖 AI Summary started immediately\n📊 Using transcript: {len(transcription_job.transcript_text):,} characters\n📡 Auto-refreshing every 10 seconds...",
+            "", gr.update(value=""), gr.update(value=""), gr.update(visible=False),
+            f"AI Processing: {transcription_job.original_filename}",
+            gr.update(value=_refresh_html("🔄 AI Summary active")), stats
+        )
+        
+    except Exception as e:
+        print(f"❌ Error triggering AI summary: {str(e)}")
+        return (
+            f"❌ Transcription completed but AI summary failed to start: {str(e)}",
+            "", gr.update(value=""), gr.update(value=""), gr.update(visible=False),
+            "AI Summary creation failed",
+            gr.update(value=""), stats
+        )
+
+
+def _build_summary_completed_result(job, summary_job_state, user, stats_display):
+    """Build result tuple for a completed AI summary job."""
+    try:
+        summary_file = create_summary_file(job.summary_text, job.job_id)
+        print(f"✅ [{user.username}] AI Summary ready: {len(job.summary_text)} characters")
+    except Exception as e:
+        print(f"⚠️ [{user.username}] Error creating summary file: {str(e)}")
+        summary_file = None
+
+    total_time = format_processing_time(summary_job_state['start_time'])
+    return (
+        f"✅ AI Summary completed! Total time: {total_time}\n📊 Generated: {len(job.summary_text):,} characters",
+        job.summary_text,
+        gr.update(value=_download_info_html(summary_file) if summary_file else ""),
+        gr.update(visible=True, value=summary_file) if summary_file else gr.update(visible=False),
+        f"Completed: {', '.join(job.original_files)}",
+        gr.update(value=""), stats_display
+    )
+
+
+def _build_summary_failed_result(job, summary_job_state, stats_display):
+    """Build result tuple for a failed AI summary job."""
+    error_msg = job.error_message[:100] + "..." if job.error_message else "Unknown error"
+    total_time = format_processing_time(summary_job_state['start_time'])
+    return (
+        f"❌ AI Summary failed after {total_time}",
+        "", gr.update(value=""), gr.update(visible=False),
+        f"Error: {error_msg}",
+        gr.update(value=""), stats_display
+    )
+
+
+def _handle_summary_monitoring(summary_job_state, user):
+    """Monitor an active AI summary job and return status tuple."""
+    if 'current_summary_job_id' not in summary_job_state:
+        return _status_result("No active AI summary job")
+    
+    job_id = summary_job_state['current_summary_job_id']
+    job = ai_summary_manager.get_summary_status(job_id)
+    
+    if not job or job.user_id != user.user_id:
+        return _status_result("AI summary job not found or access denied")
+    
+    processing_time = format_processing_time(job.created_at, job.completed_at)
+    
+    last_status = summary_job_state.get('last_status', '')
+    if job.status != last_status:
+        print(f"🔄 [{user.username}] AI Summary status: {last_status} → {job.status}")
+        summary_job_state['last_status'] = job.status
+    
+    stats_display = get_user_stats_display(user)
+    files_label = ', '.join(job.original_files[:2]) + ('...' if len(job.original_files) > 2 else '')
+    
+    if job.status == 'completed' and job.summary_text and job.summary_text.strip():
+        return _build_summary_completed_result(job, summary_job_state, user, stats_display)
+    
+    if job.status == 'failed':
+        return _build_summary_failed_result(job, summary_job_state, stats_display)
+    
+    if job.status == 'processing':
+        return (
+            f"🤖 AI analyzing and generating summary... ({processing_time} AI processing)\n📊 Creating comprehensive analysis\n📡 Auto-refreshing every 10 seconds...",
+            "", gr.update(value=""), gr.update(visible=False),
+            f"AI Processing: {files_label}",
+            gr.update(value=_refresh_html("🔄 AI generating summary")), stats_display
+        )
+    
+    # pending
+    return (
+        f"⏳ AI Summary queued... ({processing_time} waiting)\n📡 Auto-refreshing every 10 seconds...",
+        "", gr.update(value=""), gr.update(visible=False),
+        f"Queued: {files_label}",
+        gr.update(value=_refresh_html("🔄 AI queued")), stats_display
+    )
+
+
 def check_ai_summary_status(summary_job_state, user, session_token=None):
     """Check status of AI summary job"""
     user = _ensure_user(user, session_token)
     if not user:
-        return (
-            "❌ Please log in to check AI summary status", 
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            "",
-            gr.update(value=""),
-            gr.update()
-        )
+        return _status_result("❌ Please log in to check AI summary status")
     
     if not summary_job_state:
-        return (
-            "No active AI summary job", 
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            "",
-            gr.update(value=""),
-            gr.update()
-        )
+        return _status_result("No active AI summary job")
     
     try:
-        # Handle special case: waiting for transcription to complete
         if summary_job_state.get('waiting_for_transcription'):
-            transcription_job_id = summary_job_state.get('transcription_job_id')
-            if not transcription_job_id:
-                return (
-                    "❌ Error: Missing transcription job ID", 
-                    "",
-                    gr.update(value=""), gr.update(visible=False),
-                    "",
-                    gr.update(value=""),
-                    gr.update()
-                )
-            
-            # Check transcription status
-            transcription_job = transcription_manager.get_job_status(transcription_job_id)
-            if not transcription_job:
-                return (
-                    "❌ Transcription job not found", 
-                    "",
-                    gr.update(value=""), gr.update(visible=False),
-                    "",
-                    gr.update(value=""),
-                    gr.update()
-                )
-            
             processing_time = format_processing_time(summary_job_state['start_time'])
-            
-            if transcription_job.status == 'pending':
-                return (
-                    f"⏳ Transcription queued... ({processing_time} elapsed)\n📡 Auto-refreshing every 10 seconds...",
-                    "",
-                    gr.update(value=""), gr.update(visible=False),
-                    f"Transcription: {transcription_job.original_filename}",
-                    gr.update(value=_refresh_html("🔄 Waiting for transcription")),
-                    get_user_stats_display(user)
-                )
-            
-            elif transcription_job.status == 'processing':
-                transcription_time = format_processing_time(transcription_job.created_at)
-                return (
-                    f"🎙️ Transcribing... ({transcription_time} transcribing, {processing_time} total)\n📡 Auto-refreshing every 10 seconds...",
-                    "",
-                    gr.update(value=""), gr.update(visible=False),
-                    f"Transcribing: {transcription_job.original_filename}",
-                    gr.update(value=_refresh_html("🔄 Transcription in progress")),
-                    get_user_stats_display(user)
-                )
-            
-            elif transcription_job.status == 'failed':
-                return (
-                    f"❌ Transcription failed - Cannot proceed\nError: {transcription_job.error_message or 'Unknown error'}",
-                    "",
-                    gr.update(value=""), gr.update(visible=False),
-                    f"Failed: {transcription_job.original_filename}",
-                    gr.update(value=""),
-                    get_user_stats_display(user)
-                )
-            
-            elif transcription_job.status == 'completed':
-                if not transcription_job.transcript_text or not transcription_job.transcript_text.strip():
-                    return (
-                        f"🔄 Transcription completed, retrieving text... ({processing_time} elapsed)\n📡 Auto-refreshing every 10 seconds...",
-                        "",
-                        gr.update(value=""), gr.update(value=""), gr.update(visible=False),
-                        f"Getting transcript: {transcription_job.original_filename}",
-                        gr.update(value=_refresh_html("🔄 Getting transcript")),
-                        get_user_stats_display(user)
-                    )
-                
-                # TRANSCRIPTION IS COMPLETE! NOW TRIGGER AI SUMMARY IMMEDIATELY
-                print("✅ Transcription completed, triggering AI summary immediately...")
-                
-                try:
-                    # Prepare transcript IDs including the newly completed one
-                    transcript_ids = summary_job_state.get('existing_transcripts', [])
-                    transcript_ids.append(transcription_job_id)
-                    
-                    # Prepare settings
-                    settings = {
-                        'content_mode': "New Audio/Video Files",
-                        'format': summary_job_state.get('summary_format', 'บทสรุปผู้บริหาร'),
-                        'output_language': summary_job_state.get('output_language', 'Thai'),
-                        'focus_areas': summary_job_state.get('focus_areas', ''),
-                        'include_timestamps': summary_job_state.get('include_timestamps', True),
-                        'include_action_items': summary_job_state.get('include_action_items', True),
-                        'language': "th-TH"
-                    }
-                    
-                    # Submit AI summary job NOW with completed transcript
-                    job_id = ai_summary_manager.submit_summary_job_enhanced(
-                        user_id=summary_job_state['user_id'],
-                        content_mode="New Audio/Video Files",
-                        summary_type=summary_job_state.get('summary_format', 'บทสรุปผู้บริหาร'),
-                        user_prompt=summary_job_state.get('ai_instructions', ''),
-                        existing_transcript_ids=transcript_ids,
-                        audio_video_files=[],
-                        document_files=summary_job_state.get('document_image_files', []),
-                        settings=settings
-                    )
-                    
-                    print(f"🤖 AI Summary job created immediately: {job_id}")
-                    
-                    # Update job state to track AI summary instead of transcription
-                    summary_job_state.update({
-                        'waiting_for_transcription': False,
-                        'current_summary_job_id': job_id,
-                        'transcription_completed_at': datetime.now().isoformat(),
-                        'last_status': 'ai_started'
-                    })
-                    
-                    return (
-                        f"✅ Transcription done! 🤖 AI Summary started immediately\n📊 Using transcript: {len(transcription_job.transcript_text):,} characters\n📡 Auto-refreshing every 10 seconds...",
-                        "",
-                        gr.update(value=""), gr.update(value=""), gr.update(visible=False),
-                        f"AI Processing: {transcription_job.original_filename}",
-                        gr.update(value=_refresh_html("🔄 AI Summary active")),
-                        get_user_stats_display(user)
-                    )
-                    
-                except Exception as e:
-                    print(f"❌ Error triggering AI summary: {str(e)}")
-                    return (
-                        f"❌ Transcription completed but AI summary failed to start: {str(e)}",
-                        "",
-                        gr.update(value=""), gr.update(value=""), gr.update(visible=False),
-                        "AI Summary creation failed",
-                        gr.update(value=""),
-                        get_user_stats_display(user)
-                    )
+            return _handle_transcription_wait(summary_job_state, user, processing_time)
         
-        # Normal AI summary job monitoring
-        if 'current_summary_job_id' not in summary_job_state:
-            return (
-                "No active AI summary job", 
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                "",
-                gr.update(value=""),
-                gr.update()
-            )
-        
-        job_id = summary_job_state['current_summary_job_id']
-        job = ai_summary_manager.get_summary_status(job_id)
-        
-        if not job or job.user_id != user.user_id:
-            return (
-                "AI summary job not found or access denied", 
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                "",
-                gr.update(value=""),
-                gr.update()
-            )
-        
-        # Calculate processing time
-        processing_time = format_processing_time(job.created_at, job.completed_at)
-        
-        # Enhanced status change logging
-        last_status = summary_job_state.get('last_status', '')
-        if job.status != last_status:
-            print(f"🔄 [{user.username}] AI Summary status: {last_status} → {job.status}")
-            summary_job_state['last_status'] = job.status
-        
-        # Get updated user stats
-        stats_display = get_user_stats_display(user)
-        
-        # Handle completed status
-        if job.status == 'completed' and job.summary_text and job.summary_text.strip():
-            # Job is complete
-            
-            # Create downloadable file
-            try:
-                summary_file = create_summary_file(job.summary_text, job_id)
-                print(f"✅ [{user.username}] AI Summary ready: {len(job.summary_text)} characters")
-            except Exception as e:
-                print(f"⚠️ [{user.username}] Error creating summary file: {str(e)}")
-                summary_file = None
-            
-            total_time = format_processing_time(summary_job_state['start_time'])
-            return (
-                f"✅ AI Summary completed! Total time: {total_time}\n📊 Generated: {len(job.summary_text):,} characters",
-                job.summary_text,
-                gr.update(value=_download_info_html(summary_file) if summary_file else ""),
-                gr.update(visible=True, value=summary_file) if summary_file else gr.update(visible=False),
-                f"Completed: {', '.join(job.original_files)}",
-                gr.update(value=""),  # Hide auto-refresh
-                stats_display
-            )
-        
-        elif job.status == 'failed':
-            # Job failed
-            error_msg = job.error_message[:100] + "..." if job.error_message else "Unknown error"
-            total_time = format_processing_time(summary_job_state['start_time'])
-            return (
-                f"❌ AI Summary failed after {total_time}",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                f"Error: {error_msg}",
-                gr.update(value=""),  # Hide auto-refresh
-                stats_display
-            )
-        
-        elif job.status == 'processing':
-            # Still processing
-            return (
-                f"🤖 AI analyzing and generating summary... ({processing_time} AI processing)\n📊 Creating comprehensive analysis\n📡 Auto-refreshing every 10 seconds...",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                f"AI Processing: {', '.join(job.original_files[:2])}{'...' if len(job.original_files) > 2 else ''}",
-                gr.update(value=_refresh_html("🔄 AI generating summary")),
-                stats_display
-            )
-        
-        else:  # pending
-            # Still pending
-            return (
-                f"⏳ AI Summary queued... ({processing_time} waiting)\n📡 Auto-refreshing every 10 seconds...",
-                "",
-                gr.update(value=""), gr.update(visible=False),
-                f"Queued: {', '.join(job.original_files[:2])}{'...' if len(job.original_files) > 2 else ''}",
-                gr.update(value=_refresh_html("🔄 AI queued")),
-                stats_display
-            )
+        return _handle_summary_monitoring(summary_job_state, user)
         
     except Exception as e:
         print(f"❌ Error checking AI summary status: {str(e)}")
-        return (
-            f"Error checking AI summary status: {str(e)}", 
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            "",
-            gr.update(value=""),
-            gr.update()
-        )
+        return _status_result(f"Error checking AI summary status: {str(e)}")
 
 def should_auto_refresh(job_state, user):
     """Check if auto-refresh should be active"""
@@ -917,7 +749,7 @@ def should_auto_refresh(job_state, user):
                 return False
             else:
                 return True
-        elif job.status in ('pending', 'processing', 'processing_gpt4o'):
+        elif job.status in ('pending', 'processing'):
             return True
         else:
             return False
@@ -1026,13 +858,6 @@ def get_transcription_history_table(user, show_all=False):
             
             # Determine transcription method
             method = "Azure STT"
-            if job.settings:
-                tm = job.settings.get('transcription_method', '')
-                if ('gpt-4o' in tm or 'llm' in tm.lower()
-                        or job.settings.get('llm_correction', False)):
-                    method = METHOD_LLM
-            if job.status == 'processing_gpt4o':
-                method = METHOD_LLM
             
             if job.status == 'completed' and job.transcript_text:
                 download_status = "✅ Download"
@@ -1056,6 +881,35 @@ def get_transcription_history_table(user, show_all=False):
         print(f"❌ Error loading transcription history: {str(e)}")
         return []
 
+def _build_summary_history_row(job):
+    """Build a single row for the AI summary history table."""
+    try:
+        created_time = to_bangkok(job.created_at)
+        formatted_date = created_time.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        formatted_date = job.created_at[:16]
+
+    status_display = format_status(job.status)
+    time_display = format_processing_time(job.created_at, job.completed_at)
+    job_id_display = job.job_id[:8] + "..." if len(job.job_id) > 8 else job.job_id
+
+    source_summary = f"{len(job.original_files)} sources"
+    if len(job.original_files) <= 2:
+        source_summary = ", ".join([f[:20] + "..." if len(f) > 20 else f for f in job.original_files])
+
+    download_status = "Available" if job.status == 'completed' and job.summary_text else status_display
+
+    return [
+        formatted_date,
+        source_summary,
+        job.settings.get('output_language', 'Thai') if job.settings else 'Thai',
+        status_display,
+        time_display,
+        job_id_display,
+        download_status
+    ]
+
+
 def get_ai_summary_history_table(user, show_all=False):
     """Get AI summary history table with Bangkok timezone"""
     if not user:
@@ -1064,46 +918,45 @@ def get_ai_summary_history_table(user, show_all=False):
     try:
         limit = 100 if show_all else 20
         summary_jobs = ai_summary_manager.get_user_summary_history(user.user_id, limit=limit)
-        
-        table_data = []
-        for job in summary_jobs:
-            try:
-                created_time = to_bangkok(job.created_at)
-                formatted_date = created_time.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                formatted_date = job.created_at[:16]
-            
-            status_display = format_status(job.status)
-            time_display = format_processing_time(job.created_at, job.completed_at)
-            job_id_display = job.job_id[:8] + "..." if len(job.job_id) > 8 else job.job_id
-            
-            # Get source summary
-            source_summary = f"{len(job.original_files)} sources"
-            if len(job.original_files) <= 2:
-                source_summary = ", ".join([f[:20] + "..." if len(f) > 20 else f for f in job.original_files])
-            
-            if job.status == 'completed' and job.summary_text:
-                download_status = "Available"
-            else:
-                download_status = status_display
-            
-            table_data.append([
-                formatted_date,
-                source_summary,
-                job.settings.get('output_language', 'Thai') if job.settings else 'Thai',
-                status_display,
-                time_display,
-                job_id_display,
-                download_status
-            ])
-        
-        return table_data
+        return [_build_summary_history_row(job) for job in summary_jobs]
         
     except Exception as e:
         print(f"❌ Error loading AI summary history: {str(e)}")
         return []
 
 # app_func.py - Updated history functions
+
+def _build_download_updates(completed_jobs, file_creator, label_prefix, get_filename):
+    """Build download gr.update list for up to 50 completed jobs."""
+    download_updates = [gr.update(visible=False)]  # ZIP file initially hidden
+    for i in range(50):
+        if i < len(completed_jobs):
+            job = completed_jobs[i]
+            try:
+                file_path = file_creator(job)
+                bkk_time = to_bangkok(job.created_at)
+                date_str = bkk_time.strftime('%Y-%m-%d %H:%M')
+                name = get_filename(job)
+                filename_short = name[:25] + "..." if len(name) > 25 else name
+                label = f"{label_prefix} {date_str} - {filename_short}"
+                download_updates.append(gr.update(visible=True, value=file_path, label=label))
+            except Exception as e:
+                print(f"Error creating download file: {e}")
+                download_updates.append(gr.update(visible=False))
+        else:
+            download_updates.append(gr.update(visible=False))
+    return download_updates
+
+
+def _get_completed_jobs_last_30_days(all_jobs, has_content):
+    """Filter jobs completed in the last 30 days that have content."""
+    thirty_days_ago = now_bangkok() - timedelta(days=30)
+    return [
+        job for job in all_jobs
+        if job.status == 'completed' and has_content(job)
+        and to_bangkok(job.created_at) >= thirty_days_ago
+    ]
+
 
 def refresh_transcription_history(user, show_all=False, session_token=None):
     """Refresh transcription history from blob storage with downloadable files"""
@@ -1116,43 +969,17 @@ def refresh_transcription_history(user, show_all=False, session_token=None):
         table_data = get_transcription_history_table(user, show_all)
         stats_display = get_user_stats_display(user)
         
-        # Get completed transcription jobs from the last 30 days directly from blob storage
         all_jobs = transcription_manager.blob_storage.get_user_transcription_history(user.user_id, limit=200)
-        
-        # Filter for completed jobs in the last 30 days (Bangkok time)
-        thirty_days_ago = now_bangkok() - timedelta(days=30)
-        
-        completed_transcripts = [
-            job for job in all_jobs 
-            if job.status == 'completed' and job.transcript_text
-            and to_bangkok(job.created_at) >= thirty_days_ago
-        ]
+        completed_transcripts = _get_completed_jobs_last_30_days(all_jobs, lambda j: bool(j.transcript_text))
         
         print(f"📥 [{user.username}] Found {len(completed_transcripts)} completed transcripts from blob storage (last 30 days)")
         
-        # Create download files (stored in temp only for download, not for persistence)
-        download_updates = []
-        download_updates.append(gr.update(visible=False))  # ZIP file initially hidden
-        
-        # Individual files
-        for i in range(50):
-            if i < len(completed_transcripts):
-                job = completed_transcripts[i]
-                try:
-                    # Create temp file for download only
-                    file_path = create_transcript_file(job.transcript_text, job.job_id)
-                    bkk_time = to_bangkok(job.created_at)
-                    date_str = bkk_time.strftime('%Y-%m-%d %H:%M')
-                    filename_short = job.original_filename[:25] + "..." if len(job.original_filename) > 25 else job.original_filename
-                    # Show method tag in download label
-                    method_tag = "🤖LLM" if (job.settings and (job.settings.get('llm_correction', False) or 'gpt-4o' in job.settings.get('transcription_method', ''))) else "STT"
-                    label = f"📄 [{method_tag}] {date_str} - {filename_short}"
-                    download_updates.append(gr.update(visible=True, value=file_path, label=label))
-                except Exception as e:
-                    print(f"Error creating download file: {e}")
-                    download_updates.append(gr.update(visible=False))
-            else:
-                download_updates.append(gr.update(visible=False))
+        download_updates = _build_download_updates(
+            completed_transcripts,
+            lambda job: create_transcript_file(job.transcript_text, job.job_id),
+            "📄 [STT]",
+            lambda job: job.original_filename
+        )
         
         return [table_data, stats_display] + download_updates
         
@@ -1173,38 +1000,17 @@ def refresh_ai_summary_history(user, show_all=False, session_token=None):
         table_data = get_ai_summary_history_table(user, show_all)
         stats_display = get_user_stats_display(user)
         
-        # Get completed AI summary jobs from the last 30 days directly from blob storage
         all_jobs = transcription_manager.blob_storage.get_user_summary_history(user.user_id, limit=200)
-        
-        thirty_days_ago = now_bangkok() - timedelta(days=30)
-        
-        completed_summaries = [
-            job for job in all_jobs 
-            if job.status == 'completed' and job.summary_text
-            and to_bangkok(job.created_at) >= thirty_days_ago
-        ]
+        completed_summaries = _get_completed_jobs_last_30_days(all_jobs, lambda j: bool(j.summary_text))
         
         print(f"📥 [{user.username}] Found {len(completed_summaries)} completed summaries from blob storage (last 30 days)")
         
-        # Create download files
-        download_updates = []
-        download_updates.append(gr.update(visible=False))  # ZIP file initially hidden
-        
-        for i in range(50):
-            if i < len(completed_summaries):
-                job = completed_summaries[i]
-                try:
-                    file_path = create_summary_file(job.summary_text, job.job_id)
-                    bkk_time = to_bangkok(job.created_at)
-                    date_str = bkk_time.strftime('%Y-%m-%d %H:%M')
-                    source_name = job.original_files[0][:30] if job.original_files else "Summary"
-                    label = f"🤖 {date_str} - {source_name}"
-                    download_updates.append(gr.update(visible=True, value=file_path, label=label))
-                except Exception as e:
-                    print(f"Error creating download file: {e}")
-                    download_updates.append(gr.update(visible=False))
-            else:
-                download_updates.append(gr.update(visible=False))
+        download_updates = _build_download_updates(
+            completed_summaries,
+            lambda job: create_summary_file(job.summary_text, job.job_id),
+            "🤖",
+            lambda job: job.original_files[0][:30] if job.original_files else "Summary"
+        )
         
         return [table_data, stats_display] + download_updates
         

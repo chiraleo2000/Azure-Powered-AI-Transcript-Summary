@@ -3,6 +3,7 @@
 ## Overview
 
 This guide covers three Docker deployment scenarios:
+
 1. **Local Development** - Using Docker Compose for quick local testing
 2. **Local Docker Testing** - Using PowerShell scripts for more control
 3. **Azure Production** - Deploying to Azure Container Registry and App Service
@@ -12,10 +13,12 @@ This guide covers three Docker deployment scenarios:
 ## Prerequisites
 
 ### All Scenarios
+
 - Docker Desktop installed and running
 - `.env` file configured with all required secrets
 
 ### Azure Deployment Only
+
 - Azure CLI installed (`az --version`)
 - Azure subscription access
 - Logged in to Azure (`az login`)
@@ -34,6 +37,7 @@ This guide covers three Docker deployment scenarios:
 ### Steps
 
 1. **Configure environment variables**
+
    ```powershell
    # Copy template if needed
    Copy-Item .env.example .env
@@ -43,21 +47,25 @@ This guide covers three Docker deployment scenarios:
    ```
 
 2. **Start the application**
+
    ```powershell
    docker compose up --build -d
    ```
 
 3. **View logs**
+
    ```powershell
    docker compose logs -f
    ```
 
 4. **Access the application**
-   ```
+
+   ```text
    http://localhost:7860
    ```
 
 5. **Stop the application**
+
    ```powershell
    docker compose down
    ```
@@ -69,6 +77,7 @@ This guide covers three Docker deployment scenarios:
 - The compose file also forces `USE_KEY_VAULT=False` for local Docker, which makes the app use your `.env` values instead of trying Managed Identity or Key Vault.
 
 ### Features
+
 - ✅ Automatic restart on failure
 - ✅ Health checks enabled
 - ✅ Persistent local storage via volumes
@@ -89,7 +98,7 @@ This guide covers three Docker deployment scenarios:
 ### Parameters
 
 | Parameter | Description | Default |
-|-----------|-------------|---------|
+| --------- | ----------- | ------- |
 | `-ImageName` | Docker image name | `ai-summary-app` |
 | `-Tag` | Image tag | `latest` |
 | `-Port` | Host port to expose | `7860` |
@@ -99,26 +108,31 @@ This guide covers three Docker deployment scenarios:
 ### Examples
 
 **Basic build and run:**
+
 ```powershell
 .\docker-build-test.ps1
 ```
 
 **Custom port:**
+
 ```powershell
 .\docker-build-test.ps1 -Port 8080
 ```
 
 **Skip build (use existing image):**
+
 ```powershell
 .\docker-build-test.ps1 -SkipBuild
 ```
 
 **Custom image name and tag:**
+
 ```powershell
 .\docker-build-test.ps1 -ImageName "my-app" -Tag "v1.0.0"
 ```
 
 ### What it does
+
 1. ✅ Checks Docker is running
 2. ✅ Validates `.env` file exists
 3. ✅ Builds Docker image (unless `-SkipBuild`)
@@ -131,21 +145,25 @@ This guide covers three Docker deployment scenarios:
 ### Troubleshooting
 
 **Container fails to start:**
+
 ```powershell
 docker logs ai-summary-app
 ```
 
 **Check running containers:**
+
 ```powershell
 docker ps -a
 ```
 
 **Access container shell:**
+
 ```powershell
 docker exec -it ai-summary-app /bin/bash
 ```
 
 **Remove and rebuild:**
+
 ```powershell
 docker stop ai-summary-app
 docker rm ai-summary-app
@@ -159,16 +177,16 @@ docker rmi ai-summary-app:latest
 
 **Best for:** Deploying to production Azure App Service with Container Registry
 
-### Usage
+### Deployment Usage
 
 ```powershell
 .\docker-deploy-azure.ps1
 ```
 
-### Parameters
+### Deployment Parameters
 
 | Parameter | Description | Default |
-|-----------|-------------|---------|
+| --------- | ----------- | ------- |
 | `-ResourceGroup` | Azure resource group name | `AI-Summary-Internal` |
 | `-AppServiceName` | App Service name | `ai-summarize-service` |
 | `-ACRName` | Azure Container Registry name | Auto-detected/created |
@@ -177,24 +195,28 @@ docker rmi ai-summary-app:latest
 | `-SkipBuild` | Skip build step | `false` |
 | `-SkipPush` | Skip push to ACR | `false` |
 
-### Examples
+### Deployment Examples
 
 **Full deployment (build + push + deploy):**
+
 ```powershell
 .\docker-deploy-azure.ps1
 ```
 
 **Deploy to specific ACR:**
+
 ```powershell
 .\docker-deploy-azure.ps1 -ACRName "myacr"
 ```
 
 **Skip build (push existing image):**
+
 ```powershell
 .\docker-deploy-azure.ps1 -SkipBuild
 ```
 
 **Custom resource group and app:**
+
 ```powershell
 .\docker-deploy-azure.ps1 `
     -ResourceGroup "MyResourceGroup" `
@@ -202,11 +224,13 @@ docker rmi ai-summary-app:latest
 ```
 
 **Version tagging:**
+
 ```powershell
 .\docker-deploy-azure.ps1 -Tag "v1.2.3"
 ```
 
-### What it does
+### Deployment Steps
+
 1. ✅ Checks Azure CLI installation
 2. ✅ Verifies Azure login
 3. ✅ Auto-detects or creates Azure Container Registry
@@ -222,6 +246,7 @@ docker rmi ai-summary-app:latest
 ### Post-Deployment
 
 **View application logs:**
+
 ```powershell
 az webapp log tail `
     --name ai-summarize-service `
@@ -229,6 +254,7 @@ az webapp log tail `
 ```
 
 **Enable container logging:**
+
 ```powershell
 az webapp log config `
     --name ai-summarize-service `
@@ -237,6 +263,7 @@ az webapp log config `
 ```
 
 **Check app status:**
+
 ```powershell
 az webapp show `
     --name ai-summarize-service `
@@ -245,6 +272,7 @@ az webapp show `
 ```
 
 **Restart app:**
+
 ```powershell
 az webapp restart `
     --name ai-summarize-service `
@@ -264,6 +292,7 @@ az webapp restart `
 ## Environment Variables
 
 ### Local Testing (.env file)
+
 ```bash
 USE_KEY_VAULT=False
 LOCAL_TESTING_MODE=False
@@ -294,6 +323,7 @@ SESSION_TIMEOUT_MINUTES=60
 ```
 
 ### Azure Production (App Service settings)
+
 ```bash
 USE_KEY_VAULT=True
 WEBSITES_PORT=7860
@@ -308,7 +338,8 @@ DOCKER_ENABLE_CI=true
 ## Architecture Overview
 
 ### Local Development Flow
-```
+
+```text
 Docker Container
 ├── Loads .env file
 ├── USE_KEY_VAULT=False
@@ -317,7 +348,8 @@ Docker Container
 ```
 
 ### Azure Production Flow
-```
+
+```text
 App Service (Docker)
 ├── Managed Identity enabled
 ├── USE_KEY_VAULT=True
@@ -351,11 +383,10 @@ healthcheck:
 
 ---
 
-## Troubleshooting
-
-### Docker Build Issues
+## General Troubleshooting
 
 **Problem:** Dependencies fail to install
+
 ```powershell
 # Check Python version in image
 docker run --rm ai-summary-app:latest python --version
@@ -365,6 +396,7 @@ docker build --no-cache -t ai-summary-app:latest .
 ```
 
 **Problem:** Files not found during build
+
 ```powershell
 # Check .dockerignore isn't excluding needed files
 cat .dockerignore
@@ -376,6 +408,7 @@ docker build --progress=plain -t ai-summary-app:latest . 2>&1 | Select-String "C
 ### Runtime Issues
 
 **Problem:** Container exits immediately
+
 ```powershell
 # Check logs
 docker logs ai-summary-app
@@ -385,6 +418,7 @@ docker run -it --rm ai-summary-app:latest /bin/bash
 ```
 
 **Problem:** Can't access on localhost
+
 ```powershell
 # Verify port mapping
 docker ps
@@ -399,6 +433,7 @@ docker run -p 8080:7860 ai-summary-app:latest
 ### Azure Deployment Issues
 
 **Problem:** ACR authentication fails
+
 ```powershell
 # Re-login to ACR
 az acr login --name your-acr-name
@@ -408,6 +443,7 @@ az acr credential show --name your-acr-name
 ```
 
 **Problem:** App Service won't pull image
+
 ```powershell
 # Enable ACR admin user
 az acr update --name your-acr-name --admin-enabled true
@@ -417,6 +453,7 @@ az webapp deployment container show-cd-url --name ai-summarize-service --resourc
 ```
 
 **Problem:** App shows "Application Error"
+
 ```powershell
 # Check Key Vault access
 az keyvault show --name ai-summary-keyvault
@@ -451,16 +488,19 @@ az webapp log tail --name ai-summarize-service --resource-group AI-Summary-Inter
 ## Next Steps
 
 1. **Test locally first:**
+
    ```powershell
    .\docker-build-test.ps1
    ```
 
 2. **Deploy to Azure:**
+
    ```powershell
    .\docker-deploy-azure.ps1
    ```
 
 3. **Monitor the application:**
+
    ```powershell
    az webapp log tail --name ai-summarize-service --resource-group AI-Summary-Internal
    ```
@@ -475,6 +515,7 @@ az webapp log tail --name ai-summarize-service --resource-group AI-Summary-Inter
 ## Quick Reference Commands
 
 ### Docker Compose
+
 ```powershell
 docker-compose up -d          # Start in background
 docker-compose logs -f        # View logs
@@ -484,6 +525,7 @@ docker-compose ps             # List services
 ```
 
 ### Docker CLI
+
 ```powershell
 docker build -t app:tag .              # Build image
 docker run -p 7860:7860 app:tag        # Run container
@@ -497,6 +539,7 @@ docker rmi <image>                      # Remove image
 ```
 
 ### Azure CLI
+
 ```powershell
 az login                                      # Login
 az account show                               # Show account
@@ -508,6 +551,7 @@ az webapp log tail --name <app> --resource-group <rg>  # View logs
 ---
 
 For more information, see:
+
 - [Dockerfile](Dockerfile)
 - [docker-compose.yml](docker-compose.yml)
 - [DEPLOYMENT_SUMMARY.md](DEPLOYMENT_SUMMARY.md)

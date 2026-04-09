@@ -7,7 +7,8 @@ This application uses **Azure Key Vault** for secure secret management. Secrets 
 ## 🏗️ Security Architecture
 
 ### Authentication Flow
-```
+
+```text
 Application (Managed Identity)
     ↓
 Azure Key Vault
@@ -30,10 +31,9 @@ Application Runtime
 ### Secrets Stored in Key Vault
 
 | Secret Name (Key Vault) | Environment Variable | Purpose |
-|------------------------|---------------------|---------|
+| ------------------------ | --------------------- | --------- |
 | `azure-speech-key-backup` | `AZURE_SPEECH_KEY_BACKUP` | Speech Service backup key |
 | `azure-openai-key` | `AZURE_OPENAI_KEY` | Azure OpenAI API key |
-| `gpt4o-transcribe-api-key` | `GPT4O_TRANSCRIBE_API_KEY` | GPT-4o Transcribe key |
 | `computer-vision-key` | `COMPUTER_VISION_KEY` | Computer Vision API key |
 | `azure-blob-connection` | `AZURE_BLOB_CONNECTION` | Storage connection string |
 | `transcripts-sas-token` | `TRANSCRIPTS_SAS_TOKEN` | Transcripts container SAS |
@@ -45,6 +45,7 @@ Application Runtime
 ### Secret Naming Convention
 
 Key Vault secret names use **kebab-case** (lowercase with hyphens):
+
 - Environment: `AZURE_OPENAI_KEY`
 - Key Vault: `azure-openai-key`
 
@@ -96,13 +97,14 @@ az keyvault secret show \
 
 The App Service uses **System-Assigned Managed Identity** with:
 
-```
+```text
 App Service → Managed Identity → Key Vault Access Policy
 ```
 
 ### Required Permissions
 
 The App Service needs:
+
 - **Key Vault Secrets User** role
 - Permissions: `GET`, `LIST` secrets
 
@@ -195,6 +197,7 @@ az keyvault secret set \
 ### Network Security
 
 1. **Enable Key Vault Firewall** (optional):
+
    ```bash
    az keyvault update \
      --name ai-summary-keyvault \
@@ -245,6 +248,7 @@ az monitor activity-log list \
 ### If Secrets Are Compromised
 
 1. **Immediate Actions:**
+
    ```bash
    # Revoke compromised secret
    az keyvault secret set-attributes \
@@ -257,6 +261,7 @@ az monitor activity-log list \
    ```
 
 2. **Check audit logs:**
+
    ```bash
    # Check who accessed the secret
    az monitor activity-log list \
@@ -280,6 +285,7 @@ az monitor activity-log list \
 ### Audit Requirements
 
 Key Vault provides:
+
 - **90-day audit logs** (default)
 - **Secret version history**
 - **Access tracking**
@@ -290,11 +296,13 @@ Key Vault provides:
 ### Common Issues
 
 **1. "Access denied" error:**
-```
+
+```text
 Error: Client does not have permission to get secrets
 ```
 
 **Solution:**
+
 ```bash
 # Check access policy
 az keyvault show --name ai-summary-keyvault \
@@ -314,6 +322,7 @@ az keyvault set-policy \
 **3. Managed Identity not working:**
 
 **Solution:**
+
 ```bash
 # Verify identity is enabled
 az webapp identity show \
@@ -334,6 +343,6 @@ az webapp identity assign \
 
 ## 🆘 Emergency Contacts
 
-- **Security Team**: security@yourcompany.com
-- **On-Call Engineer**: oncall@yourcompany.com
+- **Security Team**: <security@yourcompany.com>
+- **On-Call Engineer**: <oncall@yourcompany.com>
 - **Azure Support**: [Create support ticket](https://portal.azure.com/#blade/Microsoft_Azure_Support/HelpAndSupportBlade)

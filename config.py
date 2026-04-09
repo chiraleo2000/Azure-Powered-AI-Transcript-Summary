@@ -85,18 +85,6 @@ AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1-mini")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
 
 # =============================================================================
-# GPT-4o TRANSCRIBE (for enhanced transcription)
-# =============================================================================
-
-GPT4O_TRANSCRIBE_ENDPOINT = os.getenv("GPT4O_TRANSCRIBE_ENDPOINT", "")
-GPT4O_TRANSCRIBE_API_KEY = get_secret_secure(
-    "gpt4o-transcribe-api-key",
-    fallback_env_var="GPT4O_TRANSCRIBE_API_KEY",
-    required=False
-)
-GPT4O_TRANSCRIBE_API_VERSION = os.getenv("GPT4O_TRANSCRIBE_API_VERSION", "2025-03-01-preview")
-
-# =============================================================================
 # TOKEN CONFIGURATION (128k input, 16k output - NO CHUNKING)
 # =============================================================================
 
@@ -156,7 +144,7 @@ META_DATA_SAS_TOKEN = get_secret_secure(
 # Blob Storage Containers
 AZURE_CONTAINER = os.getenv("AZURE_CONTAINER", "transcripts")
 CHAT_RESPONSES_CONTAINER = os.getenv("CHAT_RESPONSES_CONTAINER", "response-chats")
-USER_PASSWORD_CONTAINER = os.getenv("USER_PASSWORD_CONTAINER", "user-password")
+USER_PASSWORD_CONTAINER = os.getenv("USER_PASSWORD_CONTAINER", "user-password")  # nosonar - container name, not a credential
 META_DATA_CONTAINER = os.getenv("META_DATA_CONTAINER", "meta-storage")
 
 # =============================================================================

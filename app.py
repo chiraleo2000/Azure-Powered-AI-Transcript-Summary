@@ -10,6 +10,14 @@ import time
 # App version - change this on every deployment to bust browser caches
 APP_VERSION = "0.1.32"
 
+# Summary format constants (avoid duplicate literals - S1192)
+SUMMARY_FMT_MEETING = "รายงานการประชุมภายใน"
+SUMMARY_FMT_EXECUTIVE = "บทสรุปสำหรับผู้บริหาร"
+SUMMARY_DEFAULT_INSTRUCTIONS = (
+    "สรุปครบถ้วน กระชับ เป็นทางการ ครอบคลุมทุกประเด็น"
+    " พร้อม Action Items ผู้รับผิดชอบ และกำหนดเวลา"
+)
+
 # Import from organized modules
 from src.ui.styles import ENHANCED_CSS, SESSION_PERSISTENCE_JS
 from app_func import (
@@ -204,20 +212,6 @@ def create_simplified_interface():
                             speakers = gr.Slider(1, 10, 2, step=1, label="👥 จำนวนผู้พูดสูงสุด", visible=False)
                             timestamps = gr.Checkbox(label="⏱️ แสดงเวลา", value=False)
                             
-                            # LLM Transcription option (visible in main settings)
-                            llm_correction = gr.Checkbox(
-                                label="🤖 LLM Transcription",
-                                value=False,
-                                info="ใช้ GPT-4o-transcribe (ไฟล์ ≤25 MiB) แม่นยำสูง ระบุผู้พูดและเวลาอัตโนมัติ"
-                            )
-                            
-                            # File size warning for LLM mode
-                            llm_size_warning = gr.Markdown(
-                                "⚠️ **LLM Transcription:** รองรับไฟล์เสียง/วิดีโอ ขนาด **ไม่เกิน 25 MiB** เท่านั้น\n\n"
-                                "✅ ระบุผู้พูดและเวลาอัตโนมัติ — ไม่ต้องตั้งค่า 🎭 แยกผู้พูด หรือ 👥 จำนวนผู้พูด",
-                                visible=False
-                            )
-                            
                             # Advanced audio settings (hidden by default)
                             with gr.Accordion("🎚️ ตั้งค่าขั้นสูง", open=False):
                                 audio_format = gr.Dropdown(
@@ -321,15 +315,15 @@ def create_simplified_interface():
                                 # Simple dropdown for summary type
                                 summary_format = gr.Dropdown(
                                     choices=[
-                                        ("รายงานการประชุม", "รายงานการประชุมภายใน"),
-                                        ("บทสรุปสำหรับผู้บริหาร", "บทสรุปสำหรับผู้บริหาร"),
+                                        ("รายงานการประชุม", SUMMARY_FMT_MEETING),
+                                        (SUMMARY_FMT_EXECUTIVE, SUMMARY_FMT_EXECUTIVE),
                                         ("รายงานประชุมภายนอก", "รายงานการประชุมภายนอก"),
                                         ("สรุปการเรียนรู้/สัมมนา", "บทสรุปการเรียนรู้หรืองานสัมมนา"),
                                         ("สรุปทั่วไป", "ทั่วไป"),
                                         ("รูปแบบกำหนดเอง", "custom_format"),
                                         ("ไม่ใช้รูปแบบ (ข้อความล้วน)", "no_format")
                                     ],
-                                    value="รายงานการประชุมภายใน",
+                                    value=SUMMARY_FMT_MEETING,
                                     label="📋 รูปแบบการสรุป"
                                 )
                                 
@@ -348,7 +342,7 @@ def create_simplified_interface():
                             ai_instructions = gr.Textbox(
                                 label="💬 คำสั่งเพิ่มเติม (ไม่บังคับ)",
                                 lines=3,
-                                placeholder="สรุปครบถ้วน กระชับ เป็นทางการ ครอบคลุมทุกประเด็น พร้อม Action Items ผู้รับผิดชอบ และกำหนดเวลา",
+                                placeholder=SUMMARY_DEFAULT_INSTRUCTIONS,
                                 visible=True,
                                 info="หากไม่กรอก จะใช้คำสั่งเริ่มต้นตามรูปแบบที่เลือก"
                             )
@@ -644,37 +638,12 @@ def create_simplified_interface():
         # Diarization toggle
         diarization_enabled.change(lambda e: gr.update(visible=e), inputs=[diarization_enabled], outputs=[speakers])
         
-        # LLM Transcription toggle - hide diarization/timestamp/speakers controls (auto-handled by GPT-4o)
-        def toggle_llm_mode(llm_enabled):
-            if llm_enabled:
-                # LLM mode: hide manual controls (GPT-4o handles diarization + timestamps automatically)
-                return (
-                    gr.update(visible=False, value=False),  # diarization_enabled - hide
-                    gr.update(visible=False),               # speakers - hide
-                    gr.update(visible=False, value=False),  # timestamps - hide
-                    gr.update(visible=True),                # llm_size_warning - show
-                )
-            else:
-                # Standard mode: show manual controls
-                return (
-                    gr.update(visible=True),   # diarization_enabled - show
-                    gr.update(visible=False),  # speakers - depends on diarization
-                    gr.update(visible=True),   # timestamps - show
-                    gr.update(visible=False),  # llm_size_warning - hide
-                )
-        
-        llm_correction.change(
-            toggle_llm_mode,
-            inputs=[llm_correction],
-            outputs=[diarization_enabled, speakers, timestamps, llm_size_warning]
-        )
-        
         # Transcription handlers
         submit_btn.click(
             submit_transcription,
             inputs=[file_upload, language, audio_format, diarization_enabled,
                     speakers, profanity, punctuation, timestamps, lexical,
-                    audio_processing, llm_correction, current_user, session_id_state],
+                    audio_processing, current_user, session_id_state],
             outputs=[status_display, transcript_output, download_info, download_btn, job_info,
                     job_state, auto_refresh_status_display, user_stats_display]
         )
@@ -697,18 +666,18 @@ def create_simplified_interface():
         
         # Update placeholder text based on format selection
         FORMAT_PLACEHOLDERS = {
-            "รายงานการประชุมภายใน": "สรุปครบถ้วน เป็นทางการ ระบุผู้รับผิดชอบ มติ/การตัดสินใจ แบ่งช่วงเวลา พร้อม Next Steps จัดกลุ่มตามผู้รับผิดชอบ",
-            "บทสรุปสำหรับผู้บริหาร": "สรุปกระชับ เน้นมติสำคัญ Action Items ประเด็นติดตาม เหมาะสำหรับผู้บริหาร",
+            SUMMARY_FMT_MEETING: "สรุปครบถ้วน เป็นทางการ ระบุผู้รับผิดชอบ มติ/การตัดสินใจ แบ่งช่วงเวลา พร้อม Next Steps จัดกลุ่มตามผู้รับผิดชอบ",
+            SUMMARY_FMT_EXECUTIVE: "สรุปกระชับ เน้นมติสำคัญ Action Items ประเด็นติดตาม เหมาะสำหรับผู้บริหาร",
             "รายงานการประชุมภายนอก": "สรุปทางการ ระบุหน่วยงาน ผู้เข้าร่วม มติร่วม ข้อตกลง แบ่งช่วงเวลา พร้อม Next Steps",
             "บทสรุปการเรียนรู้หรืองานสัมมนา": "สรุปประเด็นเรียนรู้ ผู้บรรยาย เครื่องมือ/ลิงก์อ้างอิง Use Cases พร้อมแหล่งข้อมูลเพิ่มเติม",
-            "ทั่วไป": "สรุปครบถ้วน กระชับ เป็นทางการ ครอบคลุมทุกประเด็น พร้อม Action Items ผู้รับผิดชอบ และกำหนดเวลา",
+            "ทั่วไป": SUMMARY_DEFAULT_INSTRUCTIONS,
             "custom_format": "ระบุรูปแบบที่ต้องการ เช่น 'สรุปเฉพาะ action items เป็นตาราง' หรือ 'เขียนเป็นบล็อก'",
             "no_format": "ระบุคำสั่งเพิ่มเติม เช่น 'เน้นตัวเลขและสถิติ' หรือ 'สรุปตามลำดับเวลา'"
         }
         
         def update_instructions_placeholder(selected_format):
             placeholder = FORMAT_PLACEHOLDERS.get(selected_format,
-                "สรุปครบถ้วน กระชับ เป็นทางการ ครอบคลุมทุกประเด็น พร้อม Action Items ผู้รับผิดชอบ และกำหนดเวลา")
+                SUMMARY_DEFAULT_INSTRUCTIONS)
             label = "💬 คำสั่งกำหนดเอง (จำเป็น)" if selected_format == "custom_format" else "💬 คำสั่งเพิ่มเติม (ไม่บังคับ)"
             return gr.update(placeholder=placeholder, label=label)
         

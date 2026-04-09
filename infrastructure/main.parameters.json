@@ -8,23 +8,56 @@
     "environment": {
       "value": "prod"
     },
+    "baseName": {
+      "value": "ai-summary-prod"
+    },
     "storageAccountName": {
-      "value": "aisummarymeetingstorage"
+      "value": "aisummaryprodstore"
     },
     "keyVaultName": {
-      "value": "ai-summary-keyvault"
+      "value": "ai-summary-prod-kv"
     },
     "appServiceName": {
-      "value": "ai-summarize-service"
+      "value": "ai-summary-prod-app"
     },
-    "updateAppService": {
-      "value": true
+    "appServicePlanName": {
+      "value": "ai-summary-prod-plan"
     },
-    "useDocker": {
-      "value": false
+    "acrName": {
+      "value": "aisummaryprodacr"
     },
-    "dockerImage": {
-      "value": ""
+    "dockerImageName": {
+      "value": "ai-summary"
+    },
+    "dockerImageTag": {
+      "value": "latest"
+    },
+    "appServicePlanSku": {
+      "value": "S1"
+    },
+    "cognitiveServicesSku": {
+      "value": "S0"
+    },
+    "speechPrimaryRegion": {
+      "value": "westus"
+    },
+    "speechBackupRegion": {
+      "value": "eastus"
+    },
+    "openaiDeploymentName": {
+      "value": "gpt-4.1-mini"
+    },
+    "openaiModelName": {
+      "value": "gpt-4.1-mini"
+    },
+    "openaiModelVersion": {
+      "value": "2025-04-14"
+    },
+    "keyVaultAdminObjectId": {
+      "value": "288a539a-ed98-4b17-b80a-b8d3d378856c"
+    },
+    "sasTokenExpiry": {
+      "value": "2030-12-31T23:59:59Z"
     }
   }
 }

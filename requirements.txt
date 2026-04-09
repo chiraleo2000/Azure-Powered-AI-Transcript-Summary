@@ -1,5 +1,5 @@
 # Core web framework
-gradio>=4.0.0
+gradio>=5.0.0,<5.34.0
 
 # Azure Services
 azure-storage-blob>=12.19.0

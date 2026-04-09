@@ -237,6 +237,20 @@ class SessionManager:
         with self._lock:
             return len(self.sessions)
     
+    def _get_expiration_reason(self, current_time, ticket):
+        """Check if a session ticket is expired and return the reason, or None."""
+        if current_time > ticket.expires_at:
+            return 'absolute_timeout'
+        if current_time - ticket.last_activity > self.inactivity_timeout:
+            return 'inactive_60min'
+        return None
+    
+    def _remove_session(self, session_id, ticket):
+        """Remove a single session and its token mapping (caller must hold self._lock)."""
+        del self.sessions[session_id]
+        if ticket.ticket_token in self.tokens:
+            del self.tokens[ticket.ticket_token]
+    
     def _cleanup_worker(self):
         """Background worker to clean up expired sessions"""
         while self.running:
@@ -245,21 +259,11 @@ class SessionManager:
                 expired_tickets = []
                 
                 with self._lock:
-                    for session_id, ticket in list(self.sessions.items()):
-                        reason = None
-                        
-                        # Check total expiration (6 hours)
-                        if current_time > ticket.expires_at:
-                            reason = 'absolute_timeout'
-                        # Check inactivity (60 minutes)
-                        elif current_time - ticket.last_activity > self.inactivity_timeout:
-                            reason = 'inactive_60min'
-                        
+                    for session_id, ticket in list(self.sessions.items()):  # noqa: S7504 - list() needed: dict mutated during iteration
+                        reason = self._get_expiration_reason(current_time, ticket)
                         if reason:
                             expired_tickets.append((session_id, ticket.ticket_token, ticket.user.username, reason))
-                            del self.sessions[session_id]
-                            if ticket.ticket_token in self.tokens:
-                                del self.tokens[ticket.ticket_token]
+                            self._remove_session(session_id, ticket)
                 
                 if expired_tickets:
                     for sid, token, username, reason in expired_tickets:

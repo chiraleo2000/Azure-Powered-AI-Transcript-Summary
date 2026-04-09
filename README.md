@@ -1,6 +1,6 @@
 # 🎙️ AI Meeting Summary v0.2.0
 
-**Azure-powered meeting transcription and AI summarization service with enterprise-grade security**
+> Azure-powered meeting transcription and AI summarization service with enterprise-grade security
 
 A full-stack web application that converts audio/video recordings into text transcripts and generates intelligent meeting summaries using Azure AI services. Now with **Azure Key Vault integration** for secure secret management.
 
@@ -8,7 +8,7 @@ A full-stack web application that converts audio/video recordings into text tran
 
 ## 🏗️ Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │           Gradio Web UI (app.py)            │
 │         Desktop-first responsive UI         │
@@ -34,6 +34,7 @@ A full-stack web application that converts audio/video recordings into text tran
 ## 🔐 Security Features (v0.2.0)
 
 ### Enterprise-Grade Secret Management
+
 - ✅ **Azure Key Vault Integration**: All secrets stored securely in Azure Key Vault
 - ✅ **Managed Identity**: Passwordless authentication using Azure Managed Identity
 - ✅ **Zero Hardcoded Secrets**: No secrets in code, config files, or containers
@@ -42,6 +43,7 @@ A full-stack web application that converts audio/video recordings into text tran
 - ✅ **RBAC**: Role-based access control with least privilege
 
 ### Infrastructure as Code
+
 - 📄 **Bicep Templates**: Complete infrastructure deployment automation
 - 🚀 **One-Click Deployment**: Deploy entire stack with single command
 - 🔄 **Reproducible**: Consistent deployments across environments
@@ -52,16 +54,14 @@ See [SECURITY.md](SECURITY.md) for detailed security documentation.
 ## ✨ Features
 
 ### 🎙️ Audio Transcription
+
 - **Azure Speech-to-Text (STT)**: Standard transcription for all audio/video files up to 500MB
-- **GPT-4o-transcribe-diarize (LLM)**: High-accuracy transcription for audio files ≤50MB
-  - Automatic speaker diarization (no manual setup needed)
-  - Automatic timestamps
-  - Superior accuracy for Thai, mixed-language, and technical content
 - **Audio conversion**: Automatic FFmpeg conversion to WAV for all formats
 - **Speaker diarization**: Identify and label different speakers
 - **Multi-language**: Thai, English, Chinese, Japanese, Korean, and 10+ more
 
 ### 🤖 AI Meeting Summary
+
 - **GPT-4.1-mini** powered summarization with 128K context window
 - Multiple summary formats:
   - 📋 Internal meeting reports
@@ -72,6 +72,7 @@ See [SECURITY.md](SECURITY.md) for detailed security documentation.
 - Multi-language output
 
 ### 🔐 Security & Auth
+
 - User registration with PDPA/GDPR compliance
 - Password hashing with salted SHA-256
 - OAuth2-style session tickets (60-minute inactivity timeout)
@@ -79,6 +80,7 @@ See [SECURITY.md](SECURITY.md) for detailed security documentation.
 - Non-root Docker user
 
 ### ☁️ Cloud Storage
+
 - **Azure Blob Storage only** — no local database
 - Automatic 30-day data cleanup
 - Container-level SAS token authentication
@@ -88,10 +90,10 @@ See [SECURITY.md](SECURITY.md) for detailed security documentation.
 
 ## 📁 Project Structure
 
-```
+```text
 ├── app.py                  # Main Gradio web interface
 ├── app_func.py             # UI event handlers and business logic
-├── backend.py              # Backend: Auth, Storage, Transcription (Azure STT + GPT-4o)
+├── backend.py              # Backend: Auth, Storage, Transcription (Azure STT)
 ├── ai_summary.py           # AI summarization engine (GPT-4.1-mini)
 ├── session_manager.py      # OAuth2-style session management
 ├── file_processors.py      # Document text extraction (PDF, DOCX, PPTX, etc.)
@@ -113,11 +115,12 @@ See [SECURITY.md](SECURITY.md) for detailed security documentation.
 ## 🚀 Quick Start
 
 ### Prerequisites
+
 - Python 3.11+
 - FFmpeg installed (`apt-get install ffmpeg` or `choco install ffmpeg`)
 - Azure account with:
   - Speech Services
-  - OpenAI Service (GPT-4.1-mini + GPT-4o-transcribe-diarize)
+  - OpenAI Service (GPT-4.1-mini)
   - Blob Storage
   - Computer Vision (optional, for image analysis)
 
@@ -156,15 +159,13 @@ For local Docker, keep API keys in `.env`. The image does not copy `.env` during
 All configuration is loaded from `.env` via `python-dotenv`. Key variables:
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `AZURE_SPEECH_KEY` | Azure Speech Services API key |
 | `AZURE_SPEECH_KEY_ENDPOINT` | Speech Services endpoint URL |
 | `AZURE_REGION` | Azure region (e.g., `westus`) |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint |
 | `AZURE_OPENAI_KEY` | Azure OpenAI API key |
 | `AZURE_OPENAI_DEPLOYMENT` | Model deployment name (e.g., `gpt-4.1-mini`) |
-| `GPT4O_TRANSCRIBE_ENDPOINT` | GPT-4o-transcribe-diarize endpoint |
-| `GPT4O_TRANSCRIBE_API_KEY` | GPT-4o API key |
 | `AZURE_BLOB_CONNECTION` | Azure Blob Storage connection string |
 | `AZURE_STORAGE_ACCOUNT_NAME` | Storage account name |
 | `AZURE_CONTAINER` | Main transcripts container |
@@ -178,7 +179,8 @@ See `.env.example` for the complete list of configuration options. In production
 
 ## 🚀 Deployment
 
-### Prerequisites
+### Deployment Prerequisites
+
 - Azure subscription with appropriate permissions
 - Azure CLI installed
 - PowerShell 7+ (for deployment scripts)
@@ -199,6 +201,7 @@ cd infrastructure
 ```
 
 This deploys:
+
 - App Service (with Managed Identity)
 - Azure OpenAI (GPT-4.1 Mini)
 - Speech Services (Primary + Backup)
@@ -217,11 +220,13 @@ See [infrastructure/README.md](infrastructure/README.md) for detailed deployment
    - Key Vault
 
 2. **Configure Managed Identity**:
+
    ```bash
    az webapp identity assign --name <app-name> --resource-group <rg-name>
    ```
 
 3. **Grant Key Vault Access**:
+
    ```bash
    az keyvault set-policy --name <kv-name> \
      --object-id <managed-identity-id> \
@@ -229,19 +234,21 @@ See [infrastructure/README.md](infrastructure/README.md) for detailed deployment
    ```
 
 4. **Set Secrets**:
+
    ```bash
    az keyvault secret set --vault-name <kv-name> \
      --name "azure-openai-key" --value "<your-key>"
    ```
 
 5. **Configure App Settings**:
+
    ```bash
    az webapp config appsettings set --name <app-name> \
      --settings USE_KEY_VAULT=True \
      AZURE_KEY_VAULT_URL=https://<kv-name>.vault.azure.net/
    ```
 
-### Local Development
+### Local Development Setup
 
 ```bash
 # Clone repository
@@ -266,12 +273,14 @@ For local development, set `USE_KEY_VAULT=False` in `.env` to use environment va
 ## 🐳 Docker Deployment
 
 ### Local Build & Run
+
 ```bash
 docker build -t ai-summary-meeting:0.1.24 .
 docker run -d -p 7860:7860 --name ai-summary ai-summary-meeting:0.1.24
 ```
 
 ### Azure Container Registry
+
 ```bash
 # Tag and push
 docker tag ai-summary-meeting:0.1.24 ocrservicecontainer-b5c7dsegfybsh9cm.azurecr.io/ai-summary-meeting:0.1.24
@@ -279,6 +288,7 @@ docker push ocrservicecontainer-b5c7dsegfybsh9cm.azurecr.io/ai-summary-meeting:0
 ```
 
 ### Security Notes
+
 - ✅ Non-root user in container
 - ✅ No secrets baked as ENV in Dockerfile (loaded from .env at runtime)
 - ✅ Minimal base image (`python:3.11-slim`)
@@ -287,37 +297,15 @@ docker push ocrservicecontainer-b5c7dsegfybsh9cm.azurecr.io/ai-summary-meeting:0
 
 ---
 
-## 🤖 GPT-4o Transcribe Diarize
-
-When **LLM Transcription** is enabled:
-- Uses `gpt-4o-transcribe-diarize` model directly
-- **Audio files only**, max **50MB**
-- Automatic speaker diarization and timestamps (no manual configuration)
-- Returns format compatible with Azure STT output: `[MM:SS] [Speaker X] text`
-- Significantly higher accuracy for Thai and mixed-language content
-
-API format:
-```
-POST {endpoint}?api-version=2025-03-01-preview
-Content-Type: multipart/form-data
-Authorization: Bearer {api_key}
-
-model=gpt-4o-transcribe-diarize
-chunking_strategy=auto
-diarization_enabled=true
-response_format=diarized_json
-```
-
----
-
 ## 📋 Changelog
 
 ### v0.2.0 (2026-02-18) - Security & Infrastructure Release
+
 - 🔐 **Azure Key Vault Integration**: All secrets now managed securely in Key Vault
 - 🏗️ **Infrastructure as Code**: Complete Bicep templates for automated deployment
 - 🔑 **Managed Identity**: Passwordless authentication for all Azure services
 - 📜 **Deployment Scripts**: PowerShell scripts for infrastructure and secret management
-- 🛡️ **Security Hardening**: 
+- 🛡️ **Security Hardening**:
   - Removed hardcoded secrets from codebase
   - Added `.env.example` with placeholders
   - Created comprehensive `.gitignore`
@@ -327,23 +315,17 @@ response_format=diarized_json
   - Improved error handling
   - Added secure configuration module (`config.py`)
   - Created Key Vault client (`azure_keyvault_client.py`)
-- 📚 **Documentation**: 
+- 📚 **Documentation**:
   - Comprehensive deployment guides
   - Security best practices
   - Infrastructure documentation
 
 ### v0.1.24 (2026-02-10)
+
 - 🧹 **Project cleanup**: Removed unused files, cache, duplicate modules
 - 🔒 **Dockerfile security**: Removed hardcoded secrets, added non-root user
 - 📁 **File consolidation**: Reduced from 15+ Python files to 7 core + 2 utility
-- 🤖 **GPT-4o Transcribe**: Enforced 50MB limit, audio-only for LLM path
-- 🎛️ **UI improvement**: Auto-hide diarization/timestamp controls when LLM mode is active
-- 📝 **Output format**: GPT-4o output matches Azure STT format `[MM:SS] [Speaker X] text`
-- 📖 **README**: Added comprehensive project documentation
-
-### v0.1.22
-- ⚡ Fast GPT-4o direct path (skip Azure STT when LLM enabled)
-- 🕐 Timestamp + Speaker diarization support
+- 🐛 **Code Quality Fixes**:
 
 ---
 

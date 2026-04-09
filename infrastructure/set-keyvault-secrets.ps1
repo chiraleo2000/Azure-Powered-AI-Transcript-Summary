@@ -5,16 +5,16 @@
 
 param(
     [Parameter(Mandatory=$false)]
-    [string]$KeyVaultName = "ai-summary-keyvault",
+    [string]$KeyVaultName = "ai-summary-prod-kv",
     
     [Parameter(Mandatory=$false)]
-    [string]$ResourceGroupName = "AI-Summary-Internal",
+    [string]$ResourceGroupName = "ai-summary-prod-rg",
     
     [Parameter(Mandatory=$false)]
-    [switch]$Interactive = $true,
+    [switch]$Interactive,
     
     [Parameter(Mandatory=$false)]
-    [switch]$FromEnvFile = $false,
+    [switch]$FromEnvFile,
     
     [Parameter(Mandatory=$false)]
     [string]$EnvFilePath = ".env"
@@ -75,20 +75,14 @@ $secrets = @(
         EnvVar = "AZURE_OPENAI_KEY"
         Description = "Azure OpenAI API Key"
         Auto = $true
-        ServiceName = "AI-Summary-Internal-openai"
-    },
-    @{
-        Name = "gpt4o-transcribe-api-key"
-        EnvVar = "GPT4O_TRANSCRIBE_API_KEY"
-        Description = "GPT-4o Transcribe API Key"
-        Auto = $false
+        ServiceName = "ai-summary-prod-openai"
     },
     @{
         Name = "computer-vision-key"
         EnvVar = "COMPUTER_VISION_KEY"
         Description = "Computer Vision API Key"
         Auto = $true
-        ServiceName = "AI-Summary-Internal-ocr"
+        ServiceName = "ai-summary-prod-ocr"
     },
     @{
         Name = "azure-blob-connection"
@@ -201,12 +195,12 @@ foreach ($secret in $secrets) {
             # Get storage connection string
             try {
                 $storageKey = az storage account keys list `
-                    --account-name "aisummarymeetingstorage" `
+                    --account-name "aisummaryprodstore" `
                     --resource-group $ResourceGroupName `
                     --query "[0].value" -o tsv
                 
                 if ($storageKey) {
-                    $value = "DefaultEndpointsProtocol=https;AccountName=aisummarymeetingstorage;AccountKey=$storageKey;EndpointSuffix=core.windows.net"
+                    $value = "DefaultEndpointsProtocol=https;AccountName=aisummaryprodstore;AccountKey=$storageKey;EndpointSuffix=core.windows.net"
                     Write-ColorOutput Green "   ✅ Retrieved from Storage Account"
                 }
             } catch {

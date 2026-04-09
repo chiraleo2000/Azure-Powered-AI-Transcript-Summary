@@ -14,16 +14,19 @@ This directory contains the Infrastructure as Code (IaC) using Azure Bicep for d
 The infrastructure deploys the following Azure resources:
 
 ### Compute
+
 - **App Service Plan** (Linux, B1/B2 SKU)
 - **App Service** (Python 3.11, with System Managed Identity)
 
 ### AI & Cognitive Services
+
 - **Azure OpenAI Service** (West US) - GPT-4.1 Mini deployment
 - **Speech Service Primary** (West US)
 - **Speech Service Backup** (East US) - For failover
 - **Computer Vision** (Southeast Asia) - OCR capabilities
 
 ### Storage
+
 - **Storage Account** with 4 blob containers:
   - `transcripts` - Audio/video transcripts
   - `response-chats` - LLM conversation history  
@@ -31,6 +34,7 @@ The infrastructure deploys the following Azure resources:
   - `meta-storage` - Metadata and session info
 
 ### Security
+
 - **Key Vault** (existing) - Secure secret storage
 - **Managed Identity** - App Service authentication
 - **RBAC Role Assignments** - Least privilege access
@@ -45,6 +49,7 @@ cd infrastructure
 ```
 
 **Optional Parameters:**
+
 - `-WhatIf` - Preview changes without deploying
 - `-ResourceGroupName` - Custom resource group name
 - `-Location` - Primary Azure region
@@ -89,17 +94,16 @@ az deployment group create \
 After deployment, the following secrets are automatically created in Key Vault:
 
 | Secret Name | Description | Auto-Created |
-|------------|-------------|--------------|
+| ------------ | ------------- | -------------- |
 | `azure-speech-key-backup` | Speech Service backup key | ✅ |
 | `azure-openai-key` | Azure OpenAI API key | ✅ |
 | `computer-vision-key` | Computer Vision API key | ✅ |
 | `azure-blob-connection` | Storage connection string | ✅ |
-| `gpt4o-transcribe-api-key` | GPT-4o Transcribe key | ❌ Manual |
 | `password-salt` | Password hashing salt | ❌ Manual |
-| `transcripts-sas-token` | Transcripts container SAS | ❌ Manual |
-| `chat-responses-sas-token` | Chat responses SAS | ❌ Manual |
-| `user-password-sas-token` | User password SAS | ❌ Manual |
-| `meta-data-sas-token` | Metadata SAS | ❌ Manual |
+| `transcripts-sas-token` | Transcripts container SAS | ✅ Auto |
+| `chat-responses-sas-token` | Chat responses SAS | ✅ Auto |
+| `user-password-sas-token` | User password SAS | ✅ Auto |
+| `meta-data-sas-token` | Metadata SAS | ✅ Auto |
 
 **To add manual secrets:**
 
@@ -114,6 +118,7 @@ az keyvault secret set \
 ### Managed Identity
 
 The App Service uses System-Assigned Managed Identity with:
+
 - **Storage Blob Data Contributor** - Read/write access to storage
 - **Cognitive Services User** - Access to AI services
 - **Key Vault Secrets User** - Read secrets from Key Vault

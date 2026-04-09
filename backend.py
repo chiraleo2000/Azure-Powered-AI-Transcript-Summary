@@ -48,8 +48,6 @@ except ImportError:
 # Check for LOCAL_TESTING_MODE
 LOCAL_TESTING_MODE = config.LOCAL_TESTING_MODE
 
-SOURCE_GPT4O_TRANSCRIBE = "GPT-4o Transcribe"
-
 if LOCAL_TESTING_MODE:
     print("=" * 80)
     print("[TEST] LOCAL TESTING MODE ENABLED")
@@ -93,9 +91,6 @@ from config import (
     AZURE_OPENAI_KEY as CONFIG_AZURE_OPENAI_KEY,
     AZURE_OPENAI_DEPLOYMENT as CONFIG_AZURE_OPENAI_DEPLOYMENT,
     AZURE_OPENAI_API_VERSION as CONFIG_AZURE_OPENAI_API_VERSION,
-    GPT4O_TRANSCRIBE_ENDPOINT as CONFIG_GPT4O_TRANSCRIBE_ENDPOINT,
-    GPT4O_TRANSCRIBE_API_KEY as CONFIG_GPT4O_TRANSCRIBE_API_KEY,
-    GPT4O_TRANSCRIBE_API_VERSION as CONFIG_GPT4O_TRANSCRIBE_API_VERSION,
 )
 
 AZURE_BLOB_CONNECTION = _require_setting("AZURE_BLOB_CONNECTION", CONFIG_AZURE_BLOB_CONNECTION)
@@ -124,347 +119,6 @@ AZURE_OPENAI_KEY = CONFIG_AZURE_OPENAI_KEY
 AZURE_OPENAI_DEPLOYMENT = CONFIG_AZURE_OPENAI_DEPLOYMENT
 AZURE_OPENAI_API_VERSION = CONFIG_AZURE_OPENAI_API_VERSION
 
-# GPT-4o Transcribe Diarize Configuration
-GPT4O_TRANSCRIBE_ENDPOINT = CONFIG_GPT4O_TRANSCRIBE_ENDPOINT
-GPT4O_TRANSCRIBE_API_KEY = CONFIG_GPT4O_TRANSCRIBE_API_KEY
-GPT4O_TRANSCRIBE_API_VERSION = CONFIG_GPT4O_TRANSCRIBE_API_VERSION
-
-
-class GPT4oTranscribeDiarize:
-    """Use GPT-4o-transcribe-diarize for enhanced audio transcription
-    
-    Sends audio files directly to GPT-4o-transcribe-diarize endpoint for:
-    - High accuracy transcription (~90%+ vs ~60% from standard STT)
-    - Speaker diarization (automatic speaker identification)
-    - Better handling of Thai, mixed languages, and technical terms
-    """
-    
-    def __init__(self):
-        self.endpoint = GPT4O_TRANSCRIBE_ENDPOINT
-        self.api_key = GPT4O_TRANSCRIBE_API_KEY or AZURE_OPENAI_KEY
-        self.api_version = GPT4O_TRANSCRIBE_API_VERSION
-        self.available = bool(self.endpoint and self.api_key)
-        
-        if self.available:
-            print("[GPT-4o] GPT-4o-transcribe-diarize initialized")
-            print(f"   Endpoint: {self.endpoint[:50]}...")
-        else:
-            print("[WARNING] GPT-4o-transcribe-diarize not available (missing config)")
-    
-    def transcribe_audio(self, audio_file_path: str, language: str = "th") -> Tuple[str, bool]:
-        """Transcribe audio file using GPT-4o-transcribe-diarize
-        
-        Args:
-            audio_file_path: Path to the audio file (WAV, MP3, etc.)
-            language: Language code (e.g., 'th', 'en', 'zh')
-        
-        Returns:
-            Tuple of (transcript_text, success_flag)
-        """
-        if not self.available:
-            print("[WARN] GPT-4o-transcribe-diarize unavailable")
-            return "", False
-        
-        if not os.path.exists(audio_file_path):
-            print(f"[WARN] Audio file not found: {audio_file_path}")
-            return "", False
-        
-        try:
-            file_size = os.path.getsize(audio_file_path)
-            print(f"[AI] Sending audio to GPT-4o-transcribe-diarize ({file_size / 1024 / 1024:.2f} MB)...")
-            print("[WARN] WARNING: Using GPT-4o-transcribe-diarize with chunking_strategy=auto and diarization_enabled=true")
-            
-            # Build request URL with API version
-            url = f"{self.endpoint}?api-version={self.api_version}"
-            
-            # Prepare headers - Use Authorization Bearer header
-            headers = {
-                "Authorization": f"Bearer {self.api_key}"
-            }
-            
-            # Get language code
-            lang_map = {
-                "th-TH": "th", "th": "th",
-                "en-US": "en", "en-GB": "en", "en": "en",
-                "zh-CN": "zh", "zh": "zh",
-                "ja-JP": "ja", "ja": "ja"
-            }
-            lang_code = lang_map.get(language, language.split("-")[0] if "-" in language else language)
-            
-            # Prepare multipart form data
-            with open(audio_file_path, 'rb') as audio_file:
-                # Determine content type based on file extension
-                ext = os.path.splitext(audio_file_path)[1].lower()
-                content_types = {
-                    '.wav': 'audio/wav',
-                    '.mp3': 'audio/mpeg',
-                    '.m4a': 'audio/mp4',
-                    '.ogg': 'audio/ogg',
-                    '.flac': 'audio/flac',
-                    '.webm': 'audio/webm'
-                }
-                content_type = content_types.get(ext, 'audio/wav')
-                
-                files = {
-                    'file': (os.path.basename(audio_file_path), audio_file, content_type)
-                }
-                
-                # Request data matches curl command:
-                # -F "model=gpt-4o-transcribe-diarize" 
-                # -F "chunking_strategy=auto" 
-                # -F "diarization_enabled=true" 
-                # -F "response_format=diarized_json"
-                data = {
-                    'model': 'gpt-4o-transcribe-diarize',
-                    'chunking_strategy': 'auto',
-                    'diarization_enabled': 'true',
-                    'response_format': 'diarized_json',
-                    'language': lang_code
-                }
-                
-                print("[FIX] API Request: model=gpt-4o-transcribe-diarize, chunking=auto, diarization=true")
-                
-                # Make request with longer timeout for large files
-                timeout = max(300, file_size // (100 * 1024))  # At least 5 min, scale with file size
-                
-                response = requests.post(
-                    url, 
-                    headers=headers, 
-                    files=files, 
-                    data=data,
-                    timeout=timeout
-                )
-            
-            if response.status_code == 200:
-                result = response.json()
-                
-                # Extract transcript from JSON response with speaker diarization
-                transcript = self._format_diarized_transcript(result)
-                
-                if transcript:
-                    print(f"[OK] GPT-4o-transcribe-diarize complete: {len(transcript)} chars")
-                    return transcript.strip(), True
-                else:
-                    print("[WARN] GPT-4o-transcribe-diarize returned empty transcript")
-                    log_error(
-                        source=SOURCE_GPT4O_TRANSCRIBE,
-                        error_type="Empty Response",
-                        message="Transcription returned empty result",
-                        details=f"File: {audio_file_path}"
-                    )
-                    return "", False
-                    
-            else:
-                error_msg = response.text[:500] if response.text else "Unknown error"
-                print(f"[WARN] GPT-4o-transcribe-diarize failed: {response.status_code} - {error_msg}")
-                log_error(
-                    source=SOURCE_GPT4O_TRANSCRIBE,
-                    error_type=f"HTTP {response.status_code}",
-                    message="GPT-4o transcription failed",
-                    details=f"URL: {url}\nResponse: {error_msg}"
-                )
-                return "", False
-                
-        except requests.exceptions.Timeout:
-            print("[WARN] GPT-4o-transcribe-diarize timed out")
-            log_error(
-                source=SOURCE_GPT4O_TRANSCRIBE,
-                error_type="Timeout",
-                message="Request timed out",
-                details=f"File: {audio_file_path}, Size: {file_size/1024/1024:.1f}MB"
-            )
-            return "", False
-        except Exception as e:
-            print(f"[WARN] GPT-4o-transcribe-diarize error: {e}")
-            log_error(
-                source=SOURCE_GPT4O_TRANSCRIBE,
-                error_type="Exception",
-                message=str(e),
-                details=f"File: {audio_file_path}"
-            )
-            return "", False
-    
-    def _format_diarized_transcript(self, result: dict) -> str:
-        """Format JSON response with speaker labels AND timestamps (Azure STT compatible format)"""
-        
-        # Check for plain text
-        if 'text' in result and not result.get('segments'):
-            return result['text']
-        
-        segments = result.get('segments', [])
-        if not segments:
-            return result.get('text', '')
-        
-        formatted_parts = []
-        current_speaker = None
-        current_text = []
-        segment_start_time = None
-        
-        for segment in segments:
-            text = segment.get('text', '').strip()
-            if not text:
-                continue
-            
-            speaker = segment.get('speaker', None)
-            start_time = segment.get('start', 0)
-            
-            # If speaker changed, output previous speaker's text with timestamp
-            if speaker != current_speaker and current_text:
-                timestamp_str = self._format_timestamp(segment_start_time) if segment_start_time is not None else ""
-                if current_speaker is not None:
-                    speaker_label = f"[{timestamp_str}] [Speaker {current_speaker}]"
-                else:
-                    speaker_label = f"[{timestamp_str}]"
-                formatted_parts.append(f"{speaker_label} {' '.join(current_text)}")
-                current_text = []
-            
-            # Track start time of current speaker segment
-            if segment_start_time is None or speaker != current_speaker:
-                segment_start_time = start_time
-            
-            current_speaker = speaker
-            current_text.append(text)
-        
-        # Add remaining text
-        if current_text:
-            timestamp_str = self._format_timestamp(segment_start_time) if segment_start_time is not None else ""
-            if current_speaker is not None:
-                speaker_label = f"[{timestamp_str}] [Speaker {current_speaker}]"
-            else:
-                speaker_label = f"[{timestamp_str}]"
-            formatted_parts.append(f"{speaker_label} {' '.join(current_text)}")
-        
-        return "\n\n".join(formatted_parts) if formatted_parts else result.get('text', '')
-    
-    def _format_timestamp(self, seconds: float) -> str:
-        """Convert seconds to MM:SS format"""
-        if seconds is None:
-            return "00:00"
-        minutes = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{minutes:02d}:{secs:02d}"
-    
-    def transcribe_audio_bytes(self, audio_bytes: bytes, filename: str, language: str = "th") -> Tuple[str, bool]:
-        """Transcribe audio from bytes using GPT-4o-transcribe-diarize
-        
-        Args:
-            audio_bytes: Audio file content as bytes
-            filename: Original filename (for extension detection)
-            language: Language code
-        
-        Returns:
-            Tuple of (transcript_text, success_flag)
-        """
-        if not self.available:
-            return "", False
-        
-        # Create temp file
-        temp_path = None
-        try:
-            ext = os.path.splitext(filename)[1] or '.wav'
-            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
-                temp_path = f.name
-                f.write(audio_bytes)
-            
-            return self.transcribe_audio(temp_path, language)
-            
-        finally:
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-
-
-# Legacy class for backward compatibility (now wraps GPT-4o-transcribe-diarize)
-class LLMTranscriptCorrector:
-    """Legacy wrapper - now uses GPT-4o-transcribe-diarize for audio-based correction"""
-    
-    def __init__(self):
-        self.gpt4o_transcribe = GPT4oTranscribeDiarize()
-        self.available = self.gpt4o_transcribe.available
-        
-        # Fallback to text-based correction if GPT-4o-transcribe not available
-        self.endpoint = AZURE_OPENAI_ENDPOINT
-        self.api_key = AZURE_OPENAI_KEY
-        self.deployment = AZURE_OPENAI_DEPLOYMENT
-        self.api_version = AZURE_OPENAI_API_VERSION
-        self.text_correction_available = bool(self.endpoint and self.api_key)
-        
-        if self.available:
-            print("[AI] LLM Transcript Corrector ready (GPT-4o-transcribe-diarize)")
-        elif self.text_correction_available:
-            print("[AI] LLM Transcript Corrector ready (text-based fallback)")
-        else:
-            print("[WARN] LLM Transcript Corrector not available")
-    
-    def correct_transcript(self, transcript_text: str, language: str = "th-TH", 
-                          context_hint: str = "") -> Tuple[str, bool]:
-        """Text-based correction fallback (when audio file not available)"""
-        if not self.text_correction_available:
-            return transcript_text, False
-        
-        if not transcript_text or len(transcript_text.strip()) < 50:
-            return transcript_text, False
-        
-        try:
-            lang_names = {
-                "th-TH": "ภาษาไทย", "en-US": "English", "en-GB": "English",
-                "zh-CN": "中文", "ja-JP": "日本語"
-            }
-            lang_name = lang_names.get(language, language)
-            
-            system_prompt = f"""คุณคือผู้เชี่ยวชาญด้านการตรวจแก้คำถอดเสียง ({lang_name})
-
-【หน้าที่】แก้ไขข้อผิดพลาดในบทถอดเสียงจากระบบ Speech-to-Text
-
-【สิ่งที่ต้องแก้ไข】
-1. คำพ้องเสียง - เลือกคำที่ถูกต้องตามบริบท
-2. ชื่อเฉพาะ คำทับศัพท์ - แก้การสะกด
-3. ประโยคขาด/เกิน - เติม/ตัดให้สมบูรณ์
-4. เครื่องหมายวรรคตอน
-
-【ห้าม】เพิ่มเนื้อหาใหม่ / แปลภาษา / สรุปความ
-
-【ผลลัพธ์】ส่งคืนเฉพาะบทถอดเสียงที่แก้ไขแล้ว"""
-
-            user_message = f"แก้ไขบทถอดเสียงนี้:\n\n{transcript_text}"
-            if context_hint:
-                user_message += f"\n\n【บริบท】{context_hint}"
-            
-            url = f"{self.endpoint}/openai/deployments/{self.deployment}/chat/completions?api-version={self.api_version}"
-            
-            headers = {"Content-Type": "application/json", "api-key": self.api_key}
-            
-            data = {
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                "max_tokens": min(16000, max(4000, len(transcript_text) // 2)),
-                "temperature": 0.1
-            }
-            
-            response = requests.post(url, headers=headers, json=data, timeout=120)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if 'choices' in result and len(result['choices']) > 0:
-                    corrected = result['choices'][0]['message']['content']
-                    if corrected and len(corrected.strip()) > len(transcript_text) * 0.5:
-                        print("[OK] Text-based LLM correction complete")
-                        return corrected.strip(), True
-            
-            return transcript_text, False
-                
-        except Exception as e:
-            print(f"[WARN] LLM text correction error: {e}")
-            return transcript_text, False
-
-
-# Global instances
-gpt4o_transcribe = GPT4oTranscribeDiarize()
-llm_corrector = LLMTranscriptCorrector()
 
 def _account_url() -> str:
     return f"https://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
@@ -1505,53 +1159,48 @@ class TranscriptionManager:
         except Exception as e:
             print(f"[WARN] Could not create default admin: {e}")
     
+    def _log_worker_status(self, pending_jobs, iteration_count):
+        """Log background worker status every 6th iteration."""
+        if not pending_jobs or iteration_count % 6 != 0:
+            return
+        active_jobs = sum(1 for j in pending_jobs if j.status == 'processing')
+        queued_jobs = sum(1 for j in pending_jobs if j.status == 'pending')
+        if active_jobs > 0 or queued_jobs > 0:
+            print(f"Background worker: {active_jobs} processing, {queued_jobs} queued")
+    
+    def _dispatch_pending_jobs(self, pending_jobs):
+        """Submit pending jobs to Azure or check processing jobs."""
+        for job in pending_jobs:
+            if job.status == 'pending' and job.audio_url:
+                self.executor.submit(self._submit_to_azure, job.job_id, job.user_id)
+            elif job.status == 'processing' and job.azure_trans_id:
+                self.executor.submit(self._check_transcription_status, job.job_id, job.user_id)
+    
     def _background_worker(self):
         """Background worker to process pending jobs"""
         iteration_count = 0
         while self.running:
             try:
                 pending_jobs = self.blob_storage.get_pending_transcription_jobs()
-                
-                if pending_jobs and iteration_count % 6 == 0:
-                    active_jobs = len([j for j in pending_jobs if j.status == 'processing'])
-                    queued_jobs = len([j for j in pending_jobs if j.status == 'pending'])
-                    if active_jobs > 0 or queued_jobs > 0:
-                        print(f"Background worker: {active_jobs} processing, {queued_jobs} queued")
-                
-                for job in pending_jobs:
-                    # IMPORTANT: Only process Azure STT jobs
-                    # GPT-4o (LLM) jobs have their own background thread and use 'processing_gpt4o' status
-                    # Never submit LLM-flagged jobs to Azure STT
-                    is_llm_job = job.settings and job.settings.get('llm_correction', False)
-                    
-                    if job.status == 'pending' and job.audio_url and not is_llm_job:
-                        self.executor.submit(self._submit_to_azure, job.job_id, job.user_id)
-                    elif job.status == 'processing' and job.azure_trans_id:
-                        self.executor.submit(self._check_transcription_status, job.job_id, job.user_id)
+                self._log_worker_status(pending_jobs, iteration_count)
+                self._dispatch_pending_jobs(pending_jobs)
                 
                 time.sleep(10)
                 iteration_count += 1
                 
             except Exception as e:
-                print(f"âŒ Background worker error: {e}")
+                print(f"❌ Background worker error: {e}")
                 time.sleep(30)
     
     def submit_transcription(self, file_bytes: bytes, original_filename: str, 
                            user_id: str, language: str, settings: Dict) -> str:
-        """Submit new transcription job - Direct to GPT-4o if LLM enabled for speed"""
+        """Submit new transcription job to Azure Speech Service"""
         job_id = str(uuid.uuid4())
         
         if not isinstance(settings, dict):
             settings = {}
         
-        # Check if LLM transcription is requested (direct GPT-4o path)
-        llm_correction = settings.get('llm_correction', False)
-        
-        if llm_correction and gpt4o_transcribe.available:
-            print("[AI] LLM Transcription enabled - Using DIRECT GPT-4o path (fast!)")
-            return self._submit_gpt4o_direct(file_bytes, original_filename, user_id, language, settings, job_id)
-        
-        # Traditional Azure STT path
+        # Azure STT path
         print(f"[MIC] Creating transcription job: {original_filename}")
         
         try:
@@ -1623,131 +1272,76 @@ class TranscriptionManager:
             print(f"[ERROR] Error submitting transcription: {e}")
             raise
 
-    def _submit_gpt4o_direct(self, file_bytes: bytes, original_filename: str,
-                            user_id: str, language: str, settings: Dict, job_id: str) -> str:
-        """Submit directly to GPT-4o-transcribe-diarize - FAST! No Azure STT delay
-        Enforces 50MB file size limit for GPT-4o API."""
+    def _run_mock_transcription(self, job, job_id, user_id):
+        """Run local mock transcription for testing mode."""
+        audio_bytes = self._download_audio_from_blob(job.audio_url)
+        if not audio_bytes:
+            raise StorageError("Failed to download audio from storage")
+        
+        ext = job.settings.get('audio_format', 'wav') if job.settings else 'wav'
+        with tempfile.NamedTemporaryFile(suffix=f'.{ext}', delete=False) as tmp:
+            tmp.write(audio_bytes)
+            temp_path = tmp.name
+        
         try:
-            # Enforce 50MB file size limit for GPT-4o API
-            max_size_bytes = 50 * 1024 * 1024  # 50MB
-            if len(file_bytes) > max_size_bytes:
-                raise AudioConversionError(
-                    f"File too large for LLM Transcription: {len(file_bytes) / 1024 / 1024:.1f}MB. "
-                    f"Maximum is 50MB. Please use standard transcription for larger files."
-                )
+            transcript, success = get_mock_transcription().transcribe_audio(temp_path, job.language)
+            if not (success and transcript):
+                raise TranscriptionError("Mock transcription failed")
             
-            print(f"[RUN] [{user_id[:8]}...] Direct GPT-4o submission: {original_filename}")
-            
-            # Convert to WAV if needed
-            file_ext = os.path.splitext(original_filename)[1].lower().lstrip('.')
-            
-            if file_ext != 'wav':
-                print(f"🔄 Converting {file_ext.upper()} to WAV...")
-                wav_bytes, error = self.audio_converter.convert_to_wav(file_bytes, original_filename)
-                if error or not wav_bytes:
-                    raise AudioConversionError(f"Conversion failed: {error}")
-                processed_bytes = wav_bytes
-                audio_format = 'wav'
-                settings['converted_to_wav'] = True
-            else:
-                processed_bytes = file_bytes
-                audio_format = 'wav'
-                settings['converted_to_wav'] = False
-            
-            # Upload audio to blob
-            audio_url = self.blob_storage.upload_audio(processed_bytes, user_id, job_id, audio_format)
-            settings['audio_format'] = audio_format
-            settings['transcription_method'] = 'gpt-4o-transcribe-diarize-direct'
-            
-            # Create job with processing_gpt4o status
-            job = TranscriptionJob(
-                job_id=job_id,
-                user_id=user_id,
-                original_filename=original_filename,
-                audio_url=audio_url,
-                language=language,
-                status="processing_gpt4o",
-                created_at=datetime.now().isoformat(),
-                settings=settings
+            transcript_url = self.blob_storage.upload_transcript_result(
+                transcript, user_id, job_id,
+                os.path.splitext(job.original_filename)[0] + "_transcript"
             )
             
-            self.blob_storage.save_transcription_job(job)
+            job.status = "completed"
+            job.transcript_text = transcript
+            job.transcript_url = transcript_url
+            job.completed_at = datetime.now().isoformat()
+            if not job.settings:
+                job.settings = {}
+            job.settings['mock_transcript_length'] = len(transcript)
+            job.settings['transcription_method'] = 'local-mock'
             
-            # Process with GPT-4o in background thread
-            threading.Thread(
-                target=self._process_gpt4o_transcription,
-                args=(job_id, user_id, processed_bytes, original_filename, language),
-                daemon=True
-            ).start()
-            
-            print(f"[OK] [{user_id[:8]}...] GPT-4o processing started: {job_id[:8]}...")
-            return job_id
-            
-        except Exception as e:
-            print(f"[ERROR] Error in direct GPT-4o submission: {e}")
-            raise
+            print(f"[OK] [LOCAL MODE] Mock transcription completed: {len(transcript)} chars")
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        
+        self.blob_storage.save_transcription_job(job)
     
-    def _process_gpt4o_transcription(self, job_id: str, user_id: str, 
-                                     audio_bytes: bytes, filename: str, language: str):
-        """Process transcription with GPT-4o in background"""
-        try:
-            job = self.blob_storage.get_transcription_job(job_id, user_id)
-            if not job:
-                return
-            
-            print(f"[AI] [{user_id[:8]}...] Starting GPT-4o transcription...")
-            
-            # Save to temp file
-            ext = job.settings.get('audio_format', 'wav')
-            with tempfile.NamedTemporaryFile(suffix=f'.{ext}', delete=False) as tmp:
-                tmp.write(audio_bytes)
-                temp_path = tmp.name
-            
-            try:
-                # Call GPT-4o
-                transcript, success = gpt4o_transcribe.transcribe_audio(
-                    audio_file_path=temp_path,
-                    language=language
-                )
-                
-                if success and transcript:
-                    # Save transcript
-                    transcript_url = self.blob_storage.upload_transcript_result(
-                        transcript, user_id, job_id,
-                        os.path.splitext(filename)[0] + "_transcript"
-                    )
-                    
-                    job.status = "completed"
-                    job.transcript_text = transcript
-                    job.transcript_url = transcript_url
-                    job.completed_at = datetime.now().isoformat()
-                    job.settings['gpt4o_transcript_length'] = len(transcript)
-                    job.settings['llm_correction_applied'] = True
-                    
-                    print(f"[OK] [{user_id[:8]}...] GPT-4o completed: {len(transcript)} chars")
-                else:
-                    job.status = "failed"
-                    job.error_message = "GPT-4o transcription failed"
-                    print(f"[ERROR] [{user_id[:8]}...] GPT-4o failed")
-                
-            finally:
-                # Clean up temp file
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-            
-            self.blob_storage.save_transcription_job(job)
-            
-        except Exception as e:
-            print(f"[ERROR] Error in GPT-4o processing: {e}")
-            if job:
-                job.status = "failed"
-                job.error_message = f"Error: {str(e)}"
-                self.blob_storage.save_transcription_job(job)
-
-
+    def _resolve_speech_key(self):
+        """Determine which Azure Speech Service key/endpoint to use. Returns (key, endpoint)."""
+        if AZURE_SPEECH_KEY:
+            print("[INFO] Using PRIMARY Azure Speech Service")
+            return AZURE_SPEECH_KEY, AZURE_SPEECH_KEY_ENDPOINT.rstrip('/')
+        if AZURE_SPEECH_KEY_BACKUP:
+            print("[INFO] Using BACKUP Azure Speech Service (no primary available)")
+            return AZURE_SPEECH_KEY_BACKUP, AZURE_SPEECH_KEY_ENDPOINT_BACKUP.rstrip('/')
+        raise SpeechServiceError("No Azure Speech Service key available!")
+    
+    def _build_stt_request(self, job, job_id):
+        """Build Azure STT API request payload and properties."""
+        settings = job.settings if job.settings else {}
+        properties = {
+            "wordLevelTimestampsEnabled": settings.get('timestamps', False),
+            "profanityFilterMode": settings.get('profanity', 'Masked').capitalize(),
+            "punctuationMode": settings.get('punctuation', 'Automatic').capitalize(),
+        }
+        
+        if settings.get('diarization_enabled', False):
+            speakers = settings.get('speakers', 2)
+            properties["diarizationEnabled"] = True
+            properties["diarization"] = {"speakers": {"minCount": 1, "maxCount": speakers}}
+        
+        return {
+            "contentUrls": [job.audio_url],
+            "locale": job.language,
+            "displayName": f"Transcription_{job_id[:8]}",
+            "properties": properties
+        }
     
     def _submit_to_azure(self, job_id: str, user_id: str):
         """Submit transcription job to Azure Speech Service (always default)"""
@@ -1756,105 +1350,21 @@ class TranscriptionManager:
             if not job or job.status != 'pending':
                 return
             
-            # Use local mock if in testing mode
             if LOCAL_TESTING_MODE:
                 print(f"[TEST] [LOCAL MODE] Using mock transcription for job {job_id[:8]}...")
-                
-                # Download audio to get content for mock
-                audio_bytes = self._download_audio_from_blob(job.audio_url)
-                if not audio_bytes:
-                    raise StorageError("Failed to download audio from storage")
-                
-                # Save to temp file for mock service
-                ext = job.settings.get('audio_format', 'wav') if job.settings else 'wav'
-                with tempfile.NamedTemporaryFile(suffix=f'.{ext}', delete=False) as tmp:
-                    tmp.write(audio_bytes)
-                    temp_path = tmp.name
-                
-                try:
-                    # Use mock transcription
-                    transcript, success = get_mock_transcription().transcribe_audio(
-                        temp_path, 
-                        job.language
-                    )
-                    
-                    if success and transcript:
-                        # Save transcript
-                        transcript_url = self.blob_storage.upload_transcript_result(
-                            transcript, user_id, job_id,
-                            os.path.splitext(job.original_filename)[0] + "_transcript"
-                        )
-                        
-                        job.status = "completed"
-                        job.transcript_text = transcript
-                        job.transcript_url = transcript_url
-                        job.completed_at = datetime.now().isoformat()
-                        if not job.settings:
-                            job.settings = {}
-                        job.settings['mock_transcript_length'] = len(transcript)
-                        job.settings['transcription_method'] = 'local-mock'
-                        
-                        print(f"[OK] [LOCAL MODE] Mock transcription completed: {len(transcript)} chars")
-                    else:
-                        raise TranscriptionError("Mock transcription failed")
-                finally:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except OSError:
-                            pass
-                
-                self.blob_storage.save_transcription_job(job)
+                self._run_mock_transcription(job, job_id, user_id)
                 return
             
             print(f"[{user_id[:8]}...] Submitting to Azure STT: {job.original_filename}")
             
-            # Determine which speech key to use (prefer primary if available)
-            if AZURE_SPEECH_KEY:
-                speech_key = AZURE_SPEECH_KEY
-                speech_endpoint = AZURE_SPEECH_KEY_ENDPOINT.rstrip('/')
-                print("[INFO] Using PRIMARY Azure Speech Service")
-            elif AZURE_SPEECH_KEY_BACKUP:
-                speech_key = AZURE_SPEECH_KEY_BACKUP
-                speech_endpoint = AZURE_SPEECH_KEY_ENDPOINT_BACKUP.rstrip('/')
-                print("[INFO] Using BACKUP Azure Speech Service (no primary available)")
-            else:
-                raise SpeechServiceError("No Azure Speech Service key available!")
-            
+            speech_key, speech_endpoint = self._resolve_speech_key()
             url = f"{speech_endpoint}/speechtotext/{API_VERSION}/transcriptions"
             headers = {
                 "Ocp-Apim-Subscription-Key": speech_key,
                 "Content-Type": "application/json"
             }
             
-            settings = job.settings if job.settings else {}
-            
-            timestamps_enabled = settings.get('timestamps', False)
-            diarization_enabled = settings.get('diarization_enabled', False)
-            
-            properties = {
-                "wordLevelTimestampsEnabled": timestamps_enabled,
-                "profanityFilterMode": settings.get('profanity', 'Masked').capitalize(),
-                "punctuationMode": settings.get('punctuation', 'Automatic').capitalize(),
-            }
-            
-            if diarization_enabled:
-                speakers = settings.get('speakers', 2)
-                properties["diarizationEnabled"] = True
-                properties["diarization"] = {
-                    "speakers": {
-                        "minCount": 1,
-                        "maxCount": speakers
-                    }
-                }
-            
-            data = {
-                "contentUrls": [job.audio_url],
-                "locale": job.language,
-                "displayName": f"Transcription_{job_id[:8]}",
-                "properties": properties
-            }
-            
+            data = self._build_stt_request(job, job_id)
             response = requests.post(url, headers=headers, json=data, timeout=30)
             
             # If primary fails with 401 and backup is available, try backup
@@ -1865,7 +1375,6 @@ class TranscriptionManager:
                 url = f"{speech_endpoint}/speechtotext/{API_VERSION}/transcriptions"
                 headers["Ocp-Apim-Subscription-Key"] = speech_key
                 response = requests.post(url, headers=headers, json=data, timeout=30)
-                
                 if response.status_code == 201:
                     print("[OK] Backup speech service succeeded!")
             
@@ -1922,20 +1431,51 @@ class TranscriptionManager:
             print(f"[WARN] Error downloading audio: {e}")
             return None
     
-    def _check_transcription_status(self, job_id: str, user_id: str):
-        """Check Azure STT status - ONLY for Azure STT jobs (no GPT-4o dual execution).
+    def _process_succeeded_transcription(self, job, job_id, user_id):
+        """Handle a succeeded Azure STT transcription — fetch, save, and mark completed."""
+        content_url = self._get_transcription_result_url(job.azure_trans_id)
+        if not content_url:
+            return
         
-        GPT-4o/LLM transcription has its own dedicated path via _process_gpt4o_transcription.
-        This method NEVER calls GPT-4o to prevent dual execution.
-        """
+        settings = job.settings if job.settings else {}
+        transcript = self._fetch_transcript(
+            content_url,
+            settings.get('diarization_enabled', False),
+            settings.get('timestamps', False),
+            settings.get('profanity', 'masked')
+        )
+        
+        settings['azure_stt_transcript_length'] = len(transcript) if transcript else 0
+        settings['transcription_method'] = 'azure-stt'
+        
+        transcript_url = self.blob_storage.upload_transcript_result(
+            transcript, user_id, job_id,
+            os.path.splitext(job.original_filename)[0] + "_transcript"
+        )
+        
+        job.status = "completed"
+        job.transcript_text = transcript
+        job.transcript_url = transcript_url
+        job.completed_at = datetime.now().isoformat()
+        job.settings = settings
+        self.blob_storage.save_transcription_job(job)
+        
+        print(f"[{user_id[:8]}...] Azure STT completed: {job.original_filename}")
+    
+    @staticmethod
+    def _extract_error_message(data):
+        """Extract error message from Azure STT response data."""
+        if "properties" in data and "error" in data["properties"]:
+            return data["properties"]["error"].get("message", "")
+        if "error" in data:
+            return data["error"].get("message", "")
+        return ""
+    
+    def _check_transcription_status(self, job_id: str, user_id: str):
+        """Check Azure STT transcription status and process results when ready."""
         try:
             job = self.blob_storage.get_transcription_job(job_id, user_id)
             if not job or job.status != 'processing' or not job.azure_trans_id:
-                return
-            
-            # Safety guard: never process LLM jobs here
-            if job.settings and job.settings.get('llm_correction', False):
-                print(f"[{user_id[:8]}...] Skipping LLM job in Azure STT checker: {job_id[:8]}")
                 return
             
             url = f"{AZURE_SPEECH_KEY_ENDPOINT}/speechtotext/{API_VERSION}/transcriptions/{job.azure_trans_id}"
@@ -1945,48 +1485,11 @@ class TranscriptionManager:
             data = r.json()
             
             if data.get("status") == "Succeeded":
-                content_url = self._get_transcription_result_url(job.azure_trans_id)
-                if content_url:
-                    settings = job.settings if job.settings else {}
-                    diarization_enabled = settings.get('diarization_enabled', False)
-                    timestamps_enabled = settings.get('timestamps', False)
-                    profanity_mode = settings.get('profanity', 'masked')
-                    
-                    # Get Azure STT transcript (pure Azure result - no GPT-4o mixing)
-                    transcript = self._fetch_transcript(
-                        content_url, 
-                        diarization_enabled, 
-                        timestamps_enabled,
-                        profanity_mode
-                    )
-                    
-                    settings['azure_stt_transcript_length'] = len(transcript) if transcript else 0
-                    settings['transcription_method'] = 'azure-stt'
-                    
-                    # Upload transcript to blob storage
-                    transcript_url = self.blob_storage.upload_transcript_result(
-                        transcript, user_id, job_id, 
-                        os.path.splitext(job.original_filename)[0] + "_transcript"
-                    )
-                    
-                    job.status = "completed"
-                    job.transcript_text = transcript
-                    job.transcript_url = transcript_url
-                    job.completed_at = datetime.now().isoformat()
-                    job.settings = settings
-                    self.blob_storage.save_transcription_job(job)
-                    
-                    print(f"[{user_id[:8]}...] Azure STT completed: {job.original_filename}")
+                self._process_succeeded_transcription(job, job_id, user_id)
                         
             elif data.get("status") in ("Failed", "FailedWithPartialResults"):
-                error_message = ""
-                if "properties" in data and "error" in data["properties"]:
-                    error_message = data["properties"]["error"].get("message", "")
-                elif "error" in data:
-                    error_message = data["error"].get("message", "")
-                
                 job.status = "failed"
-                job.error_message = f"Azure transcription failed: {error_message}"
+                job.error_message = f"Azure transcription failed: {self._extract_error_message(data)}"
                 job.completed_at = datetime.now().isoformat()
                 self.blob_storage.save_transcription_job(job)
                 
@@ -2029,63 +1532,64 @@ class TranscriptionManager:
             print(f"âŒ Error fetching transcript: {e}")
             return ""
     
+    def _get_timestamp_str(self, phrase):
+        """Extract and format a timestamp string from a recognized phrase."""
+        offset = phrase.get('offset')
+        if not offset:
+            return None
+        if isinstance(offset, str) and offset.startswith('PT'):
+            return self._parse_iso_duration(offset)
+        offset_ticks = phrase.get('offsetInTicks', 0)
+        return self._format_timestamp(offset_ticks / 10000000.0)
+    
+    def _format_recognized_phrase(self, phrase, get_text, timestamps_enabled, diarization_enabled):
+        """Format a single recognized phrase into a text line, or return None."""
+        nbest = phrase.get('nBest', [])
+        if not nbest:
+            return None
+        
+        text = get_text(nbest[0])
+        if not text:
+            return None
+        
+        parts = []
+        if timestamps_enabled:
+            ts = self._get_timestamp_str(phrase)
+            if ts:
+                parts.append(f"[{ts}]")
+        
+        if diarization_enabled:
+            speaker = phrase.get('speaker')
+            if speaker is not None:
+                parts.append(f"[Speaker {speaker}]")
+        
+        parts.append(text)
+        return " ".join(parts)
+    
     def _format_transcript(self, data: Dict, diarization_enabled: bool = False, 
                       timestamps_enabled: bool = False, profanity_mode: str = 'masked') -> str:
         """Format Azure transcript"""
         try:
-            lines = []
-            
             def get_text_by_profanity_mode(nbest_item):
                 if profanity_mode == 'raw':
                     return nbest_item.get('lexical', nbest_item.get('display', ''))
-                elif profanity_mode == 'removed':
+                if profanity_mode == 'removed':
                     return nbest_item.get('itn', nbest_item.get('display', ''))
-                else:
-                    return nbest_item.get('display', nbest_item.get('maskedITN', ''))
+                return nbest_item.get('display', nbest_item.get('maskedITN', ''))
             
             recognized_phrases = data.get('recognizedPhrases', [])
             
             if not recognized_phrases:
                 combined_phrases = data.get('combinedRecognizedPhrases', [])
                 if combined_phrases:
-                    for phrase in combined_phrases:
-                        text = get_text_by_profanity_mode(phrase)
-                        if text:
-                            lines.append(text)
+                    lines = [get_text_by_profanity_mode(p) for p in combined_phrases if get_text_by_profanity_mode(p)]
                     return "\n\n".join(lines) if lines else "No transcript available"
             
+            lines = []
             for phrase in recognized_phrases:
-                nbest = phrase.get('nBest', [])
-                if not nbest:
-                    continue
-                    
-                best = nbest[0]
-                text = get_text_by_profanity_mode(best)
-                
-                if not text:
-                    continue
-                
-                line_parts = []
-                
-                if timestamps_enabled:
-                    offset = phrase.get('offset')
-                    if offset:
-                        if isinstance(offset, str) and offset.startswith('PT'):
-                            timestamp_str = self._parse_iso_duration(offset)
-                        else:
-                            offset_ticks = phrase.get('offsetInTicks', 0)
-                            timestamp_seconds = offset_ticks / 10000000.0
-                            timestamp_str = self._format_timestamp(timestamp_seconds)
-                        
-                        line_parts.append(f"[{timestamp_str}]")
-                
-                if diarization_enabled:
-                    speaker = phrase.get('speaker')
-                    if speaker is not None:
-                        line_parts.append(f"[Speaker {speaker}]")
-                
-                line_parts.append(text)
-                lines.append(" ".join(line_parts))
+                line = self._format_recognized_phrase(phrase, get_text_by_profanity_mode, timestamps_enabled, diarization_enabled)
+                if line:
+                    lines.append(line)
             
             return "\n\n".join(lines) if lines else "No transcript available"
             
@@ -2316,76 +1820,49 @@ else:
     print("[OK] FFmpeg detected and ready for audio conversion")
 
 # Validate Azure Speech Service connectivity
+def _test_speech_key(key, endpoint_raw, label):
+    """Test a single Azure Speech Service key and return True if valid."""
+    if not key:
+        print(f"\n⏭️  {label} Service: Not configured (skipped)")
+        return False
+    try:
+        endpoint = endpoint_raw.rstrip('/')
+        url = f"{endpoint}/speechtotext/{API_VERSION}/transcriptions"
+        headers = {"Ocp-Apim-Subscription-Key": key}
+        
+        print(f"\n📡 Testing {label} Service:")
+        print(f"   Endpoint: {endpoint}")
+        print(f"   URL: {url}")
+        print(f"   Key: {key[:8]}...{key[-4:]}")
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        print(f"   Response Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            print(f"   ✅ {label} Service is VALID and WORKING!")
+            return True
+        if response.status_code == 401:
+            print(f"   ❌ {label} Service AUTHENTICATION FAILED (401)")
+            print(f"   Error: {response.text}")
+        else:
+            print(f"   ⚠️  {label} Service returned: {response.status_code}")
+            print(f"   Response: {response.text[:200]}")
+    except Exception as e:
+        print(f"   ❌ {label} Service test FAILED: {str(e)}")
+    return False
+
+
 def validate_speech_service():
     """Test Azure Speech Service key validity on startup"""
     import requests
-    
-    API_VERSION = "v3.2"
-    valid_key_found = False
     
     print("\n" + "="*70)
     print("🔍 TESTING AZURE SPEECH SERVICE CONNECTIVITY")
     print("="*70)
     
-    # Test primary if available
-    if AZURE_SPEECH_KEY:
-        try:
-            endpoint = AZURE_SPEECH_KEY_ENDPOINT.rstrip('/')
-            url = f"{endpoint}/speechtotext/{API_VERSION}/transcriptions"
-            headers = {"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY}
-            
-            print("\n📡 Testing PRIMARY Service:")
-            print(f"   Endpoint: {endpoint}")
-            print(f"   URL: {url}")
-            print(f"   Key: {AZURE_SPEECH_KEY[:8]}...{AZURE_SPEECH_KEY[-4:]}")
-            
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            print(f"   Response Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                print("   ✅ PRIMARY Service is VALID and WORKING!")
-                valid_key_found = True
-            elif response.status_code == 401:
-                print("   ❌ PRIMARY Service AUTHENTICATION FAILED (401)")
-                print(f"   Error: {response.text}")
-            else:
-                print(f"   ⚠️  PRIMARY Service returned: {response.status_code}")
-                print(f"   Response: {response.text[:200]}")
-        except Exception as e:
-            print(f"   ❌ PRIMARY Service test FAILED: {str(e)}")
-    else:
-        print("\n⏭️  PRIMARY Service: Not configured (skipped)")
-    
-    # Test backup if available
-    if AZURE_SPEECH_KEY_BACKUP:
-        try:
-            endpoint = AZURE_SPEECH_KEY_ENDPOINT_BACKUP.rstrip('/')
-            url = f"{endpoint}/speechtotext/{API_VERSION}/transcriptions"
-            headers = {"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY_BACKUP}
-            
-            print("\n📡 Testing BACKUP Service:")
-            print(f"   Endpoint: {endpoint}")
-            print(f"   URL: {url}")
-            print(f"   Key: {AZURE_SPEECH_KEY_BACKUP[:8]}...{AZURE_SPEECH_KEY_BACKUP[-4:]}")
-            
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            print(f"   Response Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                print("   ✅ BACKUP Service is VALID and WORKING!")
-                valid_key_found = True
-            elif response.status_code == 401:
-                print("   ❌ BACKUP Service AUTHENTICATION FAILED (401)")
-                print(f"   Error: {response.text}")
-            else:
-                print(f"   ⚠️  BACKUP Service returned: {response.status_code}")
-                print(f"   Response: {response.text[:200]}")
-        except Exception as e:
-            print(f"   ❌ BACKUP Service test FAILED: {str(e)}")
-    else:
-        print("\n⏭️  BACKUP Service: Not configured (skipped)")
+    primary_ok = _test_speech_key(AZURE_SPEECH_KEY, AZURE_SPEECH_KEY_ENDPOINT, "PRIMARY")
+    backup_ok = _test_speech_key(AZURE_SPEECH_KEY_BACKUP, AZURE_SPEECH_KEY_ENDPOINT_BACKUP, "BACKUP")
+    valid_key_found = primary_ok or backup_ok
     
     print("\n" + "="*70)
     if valid_key_found:
