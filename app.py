@@ -223,7 +223,7 @@ def create_simplified_interface():
                                         ("คุณภาพสูง (ลดเสียงรบกวน + เพิ่มเสียงผู้พูด + แยกผู้พูด)", "advanced"),
                                         ("เร็ว", "minimal")
                                     ],
-                                    value="advanced", label="🔊 ระดับคุณภาพเสียง"
+                                    value="standard", label="🔊 ระดับคุณภาพเสียง"
                                 )
                                 profanity = gr.Dropdown(
                                     choices=[
