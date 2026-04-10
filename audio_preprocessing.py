@@ -10,9 +10,10 @@ Strategy:
     WAV output for files ≤50 MB only, for extra noise reduction quality.
 
 Processing levels:
-  - minimal : FFmpeg loudnorm only
-  - standard: FFmpeg noise gate + speech filter + loudnorm
-  - advanced : FFmpeg full chain + Python noisereduce + scipy speech boost
+  - minimal : FFmpeg loudnorm only (fastest)
+  - standard: FFmpeg highpass + lowpass + loudnorm (light, fast)
+  - advanced : FFmpeg full chain (noise gate, EQ, compressor, limiter, loudnorm)
+               + Python noisereduce + scipy speech boost (for files ≤50 MB)
 """
 
 import os
@@ -74,8 +75,8 @@ def enhance_audio_file(
         else:
             out_path = _enhance_single(input_path, level, metadata)
 
-        # Optional Python refinement for small-enough WAVs
-        if file_size_mb <= PYTHON_REFINE_THRESHOLD_MB and level in ("standard", "advanced"):
+        # Optional Python refinement for small-enough WAVs (advanced only)
+        if file_size_mb <= PYTHON_REFINE_THRESHOLD_MB and level == "advanced":
             out_path = _python_refine(out_path, level, metadata)
 
         # Verify output exists and has content
@@ -147,6 +148,7 @@ def _enhance_chunked(input_path: str, level: str, metadata: Dict) -> str:
         n_chunks = max(1, int(duration // CHUNK_DURATION_SECONDS) + (1 if duration % CHUNK_DURATION_SECONDS > 0 else 0))
         print(f"[AUDIO] Chunking {duration:.0f}s audio into {n_chunks} chunks of {CHUNK_DURATION_SECONDS}s")
         metadata["applied_methods"].append(f"chunked_{n_chunks}_parts")
+        metadata["original_duration_s"] = round(duration, 1)
 
         # --- 2. Split & 3. Enhance chunks ----------------------------------------
         chunk_files = _split_into_chunks(input_path, chunk_dir)
@@ -155,9 +157,20 @@ def _enhance_chunked(input_path: str, level: str, metadata: Dict) -> str:
             return _enhance_single(input_path, level, metadata)
 
         enhanced_chunks = _enhance_all_chunks(chunk_files, chunk_dir, level, metadata)
+        if not enhanced_chunks:
+            print("[ERROR] No enhanced chunks — falling back to single-pass")
+            return _enhance_single(input_path, level, metadata)
+
+        print(f"[AUDIO] {len(enhanced_chunks)} enhanced chunks ready for concatenation")
 
         # --- 4. Concatenate enhanced chunks ---------------------------------------
         final_path = _concatenate_chunks(enhanced_chunks, chunk_dir, metadata)
+
+        # Verify concatenated duration is close to original
+        final_duration = metadata.get("concatenated_duration_s", 0)
+        if final_duration < duration * 0.8:
+            print(f"[WARN] Concatenated duration ({final_duration:.0f}s) much shorter than original ({duration:.0f}s)")
+
         return final_path
 
     finally:
@@ -231,6 +244,11 @@ def _concatenate_chunks(enhanced_chunks: List[str], chunk_dir: str, metadata: Di
             safe_path = ep.replace("\\", "/")
             f.write(f"file '{safe_path}'\n")
 
+    print(f"[AUDIO] Concat list ({len(enhanced_chunks)} entries):")
+    for ep in enhanced_chunks:
+        sz = os.path.getsize(ep) / (1024 * 1024) if os.path.exists(ep) else 0
+        print(f"[AUDIO]   {os.path.basename(ep)} — {sz:.1f} MB")
+
     out_fd = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     final_path = out_fd.name
     out_fd.close()
@@ -243,9 +261,18 @@ def _concatenate_chunks(enhanced_chunks: List[str], chunk_dir: str, metadata: Di
         final_path,
     ]
     print(f"[AUDIO] Concatenating {len(enhanced_chunks)} enhanced chunks...")
-    _run_ffmpeg(concat_cmd)
+    _run_ffmpeg(concat_cmd, critical=True)
+
+    # Verify output
+    out_duration = _get_duration(final_path)
+    out_size_mb = os.path.getsize(final_path) / (1024 * 1024) if os.path.exists(final_path) else 0
+    print(f"[AUDIO] Concatenated result: {out_size_mb:.1f} MB, {out_duration:.0f}s duration")
+
+    if out_duration < 10:
+        raise RuntimeError(f"Concatenated output too short ({out_duration:.0f}s) — expected full-length audio")
 
     metadata["applied_methods"].append("concat_chunks")
+    metadata["concatenated_duration_s"] = round(out_duration, 1)
     return final_path
 
 
@@ -318,17 +345,29 @@ def _python_refine(wav_path: str, level: str, metadata: Dict) -> str:
 def _build_ffmpeg_filter_chain(level: str, is_chunk: bool = False) -> str:
     """Build FFmpeg -af filter chain based on processing level.
 
-    All filters are streaming (constant memory) — safe for any file size.
-    When ``is_chunk=True`` we can afford ``linear=true`` on loudnorm because
-    chunks are short (10 min).  For single-pass on the whole file we use the
-    real-time (one-pass) loudnorm to avoid buffering the entire decoded audio.
+    Processing tiers:
+      minimal  — loudnorm only (fastest)
+      standard — light cleanup: highpass + lowpass + loudnorm (fast)
+      advanced — full treatment: noise gate, EQ, compressor, limiter, loudnorm
+
+    When ``is_chunk=True`` we use ``linear=true`` on loudnorm (chunks are
+    short enough).  For single-pass we use real-time one-pass loudnorm.
     """
     linear = "linear=true" if is_chunk else "linear=false"
 
     if level == "minimal":
         return f"loudnorm=I=-16:TP=-1.5:LRA=11:{linear}"
 
-    # Standard and advanced get the full treatment
+    if level == "standard":
+        # Light improvement: just clean up rumble/hiss + normalize loudness
+        filters = [
+            "highpass=f=80",
+            "lowpass=f=8000",
+            f"loudnorm=I=-16:TP=-1.5:LRA=11:{linear}",
+        ]
+        return ",".join(filters)
+
+    # Advanced — full heavy treatment
     filters = [
         # 1. Remove low-frequency rumble (HVAC, traffic, room resonance)
         "highpass=f=80",
@@ -340,17 +379,15 @@ def _build_ffmpeg_filter_chain(level: str, is_chunk: bool = False) -> str:
         "equalizer=f=6000:t=q:w=2:g=-4",
         # 5. Speech presence boost (1kHz–4kHz) — makes voices clearer
         "equalizer=f=2500:t=q:w=1.5:g=3",
-        # 6. Dynamic range compression: boost quiet speech, control peaks
+        # 6. Extra mid-range speech warmth boost
+        "equalizer=f=800:t=q:w=1:g=2",
+        # 7. Dynamic range compression: boost quiet speech, control peaks
         "acompressor=threshold=0.025:ratio=4:attack=5:release=80:makeup=3:knee=2.5",
-        # 7. Limiter to prevent clipping from makeup gain
+        # 8. Limiter to prevent clipping from makeup gain
         "alimiter=limit=0.95:attack=0.5:release=10",
-        # 8. EBU R128 broadcast loudness normalization
+        # 9. EBU R128 broadcast loudness normalization
         f"loudnorm=I=-16:TP=-1.5:LRA=11:{linear}",
     ]
-
-    if level == "advanced":
-        # Insert extra mid-range speech warmth boost before compressor
-        filters.insert(5, "equalizer=f=800:t=q:w=1:g=2")
 
     return ",".join(filters)
 
@@ -442,12 +479,17 @@ def _get_duration(file_path: str) -> float:
     return 0.0
 
 
-def _run_ffmpeg(cmd: list, timeout: int = 3600) -> subprocess.CompletedProcess:
-    """Run an FFmpeg command with error handling."""
+def _run_ffmpeg(cmd: list, timeout: int = 3600, critical: bool = False) -> subprocess.CompletedProcess:
+    """Run an FFmpeg command with error handling.
+    
+    If ``critical=True``, raises RuntimeError on non-zero exit code.
+    """
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         stderr_short = (result.stderr or "")[:300]
         print(f"[WARN] FFmpeg error: {stderr_short}")
+        if critical:
+            raise RuntimeError(f"FFmpeg command failed (exit {result.returncode}): {stderr_short}")
     return result
 
 
