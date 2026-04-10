@@ -81,15 +81,15 @@ AZURE_OPENAI_KEY = get_secret_secure(
     fallback_env_var="AZURE_OPENAI_KEY",
     required=True
 )
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1-mini")
-AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4-nano")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
 
 # =============================================================================
-# TOKEN CONFIGURATION (128k input, 16k output - NO CHUNKING)
+# TOKEN CONFIGURATION (1M input, 32k output - GPT 5.4 nano - NO CHUNKING)
 # =============================================================================
 
-AZURE_OPENAI_MAX_TOKENS = int(os.getenv("AZURE_OPENAI_MAX_TOKENS", "128000"))
-AZURE_OPENAI_COMPLETION_TOKENS = int(os.getenv("AZURE_OPENAI_COMPLETION_TOKENS", "16000"))
+AZURE_OPENAI_MAX_TOKENS = int(os.getenv("AZURE_OPENAI_MAX_TOKENS", "1000000"))
+AZURE_OPENAI_COMPLETION_TOKENS = int(os.getenv("AZURE_OPENAI_COMPLETION_TOKENS", "32000"))
 
 # Chunking Configuration (DISABLED)
 ENABLE_CHUNKING = os.getenv("ENABLE_CHUNKING", "False").lower() in ("true", "1", "yes")
@@ -98,9 +98,9 @@ AZURE_OPENAI_CHUNK_SIZE = int(os.getenv("AZURE_OPENAI_CHUNK_SIZE", "0"))
 AZURE_OPENAI_OVERLAP_TOKENS = int(os.getenv("AZURE_OPENAI_OVERLAP_TOKENS", "0"))
 
 # Content Token Budgets (for optimization only)
-AI_TOKEN_LIMIT_TRANSCRIPTS = int(os.getenv("AI_TOKEN_LIMIT_TRANSCRIPTS", "100000"))
-AI_TOKEN_LIMIT_DOCUMENTS = int(os.getenv("AI_TOKEN_LIMIT_DOCUMENTS", "20000"))
-AI_TOKEN_LIMIT_IMAGES = int(os.getenv("AI_TOKEN_LIMIT_IMAGES", "8000"))
+AI_TOKEN_LIMIT_TRANSCRIPTS = int(os.getenv("AI_TOKEN_LIMIT_TRANSCRIPTS", "800000"))
+AI_TOKEN_LIMIT_DOCUMENTS = int(os.getenv("AI_TOKEN_LIMIT_DOCUMENTS", "150000"))
+AI_TOKEN_LIMIT_IMAGES = int(os.getenv("AI_TOKEN_LIMIT_IMAGES", "50000"))
 
 # AI Processing Settings
 AI_MAX_PROCESSING_TIME_MINUTES = int(os.getenv("AI_MAX_PROCESSING_TIME_MINUTES", "30"))
@@ -144,7 +144,7 @@ META_DATA_SAS_TOKEN = get_secret_secure(
 # Blob Storage Containers
 AZURE_CONTAINER = os.getenv("AZURE_CONTAINER", "transcripts")
 CHAT_RESPONSES_CONTAINER = os.getenv("CHAT_RESPONSES_CONTAINER", "response-chats")
-USER_PASSWORD_CONTAINER = os.getenv("USER_PASSWORD_CONTAINER", "user-password")  # nosonar - container name, not a credential
+USER_AUTH_CONTAINER = os.getenv("USER_PASSWORD_CONTAINER", "user-password")
 META_DATA_CONTAINER = os.getenv("META_DATA_CONTAINER", "meta-storage")
 
 # =============================================================================
@@ -173,6 +173,16 @@ AUDIO_FORMATS = os.getenv("AUDIO_FORMATS", "wav,mp3,ogg,opus,flac,wma,aac,m4a,am
 VIDEO_FORMATS = os.getenv("VIDEO_FORMATS", "mp4,mov,avi,mkv,webm,flv,3gp,wmv")
 DOCUMENT_FORMATS = os.getenv("DOCUMENT_FORMATS", "pdf,docx,doc,pptx,ppt,xlsx,xls,txt,csv,json")
 IMAGE_FORMATS = os.getenv("IMAGE_FORMATS", "jpg,jpeg,png,bmp,gif,tiff,webp")
+
+# Audio Preprocessing
+DEFAULT_AUDIO_PROCESSING = os.getenv("DEFAULT_AUDIO_PROCESSING", "standard")
+NOISE_REDUCTION_STRENGTH = float(os.getenv("NOISE_REDUCTION_STRENGTH", "0.8"))
+TARGET_LOUDNESS_DBFS = int(os.getenv("TARGET_LOUDNESS_DBFS", "-20"))
+ENABLE_SPEAKER_SEPARATION = os.getenv("ENABLE_SPEAKER_SEPARATION", "True").lower() in ("true", "1", "yes")
+# Files larger than this (MB) skip Python-level numpy processing to prevent OOM
+# FFmpeg enhancement still runs for these files
+MAX_AUDIO_PREPROCESS_MB = int(os.getenv("MAX_AUDIO_PREPROCESS_MB", "500"))
+MAX_UPLOAD_FILE_MB = int(os.getenv("MAX_UPLOAD_FILE_MB", "500"))
 
 # =============================================================================
 # UI CONFIGURATION

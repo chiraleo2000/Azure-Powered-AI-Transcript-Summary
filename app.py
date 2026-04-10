@@ -8,7 +8,7 @@ import base64
 import time
 
 # App version - change this on every deployment to bust browser caches
-APP_VERSION = "0.1.32"
+APP_VERSION = "0.1.38"
 
 # Summary format constants (avoid duplicate literals - S1192)
 SUMMARY_FMT_MEETING = "รายงานการประชุมภายใน"
@@ -173,7 +173,7 @@ def create_simplified_interface():
             cancel_reset_btn = gr.Button("✖ ยกเลิก", variant="secondary")
         
         # ==================== MAIN APP ====================
-        with gr.Column(visible=False) as main_app:
+        with gr.Column(visible=False, elem_id="main_app_section") as main_app:
             
             with gr.Row():
                 with gr.Column(scale=4):
@@ -208,8 +208,8 @@ def create_simplified_interface():
                                 value="th-TH"
                             )
                             
-                            diarization_enabled = gr.Checkbox(label="🎭 แยกผู้พูด", value=False)
-                            speakers = gr.Slider(1, 10, 2, step=1, label="👥 จำนวนผู้พูดสูงสุด", visible=False)
+                            diarization_enabled = gr.Checkbox(label="🎭 แยกผู้พูด", value=True)
+                            speakers = gr.Slider(1, 10, 2, step=1, label="👥 จำนวนผู้พูดสูงสุด", visible=True)
                             timestamps = gr.Checkbox(label="⏱️ แสดงเวลา", value=False)
                             
                             # Advanced audio settings (hidden by default)
@@ -220,10 +220,10 @@ def create_simplified_interface():
                                 audio_processing = gr.Dropdown(
                                     choices=[
                                         ("มาตรฐาน", "standard"),
-                                        ("คุณภาพสูง", "advanced"),
+                                        ("คุณภาพสูง (ลดเสียงรบกวน + เพิ่มเสียงผู้พูด + แยกผู้พูด)", "advanced"),
                                         ("เร็ว", "minimal")
                                     ],
-                                    value="standard", label="🔊 ระดับคุณภาพเสียง"
+                                    value="advanced", label="🔊 ระดับคุณภาพเสียง"
                                 )
                                 profanity = gr.Dropdown(
                                     choices=[
@@ -508,7 +508,7 @@ def create_simplified_interface():
         # ==================== TIMERS ====================
         transcript_timer = gr.Timer(10.0)
         ai_timer = gr.Timer(10.0)
-        session_check_timer = gr.Timer(5.0)
+        session_check_timer = gr.Timer(120.0)
         
         # ==================== EVENT HANDLERS ====================
         
@@ -517,6 +517,10 @@ def create_simplified_interface():
             from src.utils.file_helpers import normalize_filepath, get_file_type
             fp = normalize_filepath(fp)
             if not fp or not os.path.exists(fp):
+                return gr.update(visible=False), gr.update(visible=False)
+            
+            # Skip preview for large files (>50MB) to avoid memory pressure
+            if os.path.getsize(fp) > 50 * 1024 * 1024:
                 return gr.update(visible=False), gr.update(visible=False)
             
             file_type = get_file_type(fp)
@@ -594,10 +598,17 @@ def create_simplified_interface():
         )
         
         # Backup: restore session when JavaScript updates the hidden session input
-        # Handles edge cases like WebSocket reconnects or delayed JS execution
+        # Only fires on EXPLICIT changes (e.g. WebSocket reconnects) — 
+        # guard against double-invocation with demo.load by checking if user is already set
         session_id_input.change(
-            restore_session_on_load,
-            inputs=[session_id_input],
+            lambda token, user: restore_session_on_load(token) if user is None else (
+                user,
+                token,
+                gr.update(visible=False),
+                gr.update(visible=True),
+                gr.update()
+            ),
+            inputs=[session_id_input, current_user],
             outputs=[current_user, session_id_state, auth_section, main_app, user_stats_display]
         )
         

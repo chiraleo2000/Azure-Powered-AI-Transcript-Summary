@@ -8,6 +8,7 @@ from ai_summary import ai_summary_manager
 from session_manager import session_manager
 import html
 import mimetypes
+import config
 
 # Bangkok timezone (UTC+7) — used for all user-facing timestamps
 BANGKOK_TZ = timezone(timedelta(hours=7))
@@ -71,6 +72,7 @@ def now_bangkok() -> datetime:
 def format_status(status):
     """Convert status to user-friendly format"""
     status_map = {
+        'enhancing': '🎵 Enhancing Audio',
         'pending': '⏳ Queued',
         'processing': '🔄 Processing',
         'completed': '✅ Done',
@@ -238,17 +240,26 @@ def _status_result(msg, info="", refresh_html=""):
 
 
 def _read_upload_file(file):
-    """Read uploaded file bytes and filename. Returns (file_bytes, filename) or raises ValueError."""
+    """Validate uploaded file and return (file_path, filename). No bytes loaded into RAM."""
+    max_bytes = config.MAX_UPLOAD_FILE_MB * 1024 * 1024
     if isinstance(file, str):
         if not os.path.exists(file):
-            raise ValueError("File not found. Please try uploading again.")
-        with open(file, 'rb') as f:
-            return f.read(), os.path.basename(file)
+            raise ValueError("Upload file no longer exists. Please re-upload and try again.")
+        file_size = os.path.getsize(file)
+        if file_size == 0:
+            raise ValueError("Upload file is empty. Please re-upload and try again.")
+        if file_size > max_bytes:
+            raise ValueError(f"File too large ({file_size // (1024*1024)} MB). Maximum is {config.MAX_UPLOAD_FILE_MB} MB.")
+        return file, os.path.basename(file)
     file_path = str(file)
     if not os.path.exists(file_path):
-        raise ValueError("Unable to process file. Please try again.")
-    with open(file_path, 'rb') as f:
-        return f.read(), os.path.basename(file_path)
+        raise ValueError("Upload file no longer exists. Please re-upload and try again.")
+    file_size = os.path.getsize(file_path)
+    if file_size == 0:
+        raise ValueError("Upload file is empty. Please re-upload and try again.")
+    if file_size > max_bytes:
+        raise ValueError(f"File too large ({file_size // (1024*1024)} MB). Maximum is {config.MAX_UPLOAD_FILE_MB} MB.")
+    return file_path, os.path.basename(file_path)
 
 
 # Transcription Functions
@@ -266,7 +277,7 @@ def submit_transcription(file, language, audio_format, diarization_enabled, spea
     try:
         # Get file data
         try:
-            file_bytes, original_filename = _read_upload_file(file)
+            file_path, original_filename = _read_upload_file(file)
         except ValueError as e:
             return _error_result(str(e))
         except Exception as e:
@@ -282,9 +293,7 @@ def submit_transcription(file, language, audio_format, diarization_enabled, spea
         if file_extension not in supported_extensions and file_extension != "":
             return _error_result(f"Unsupported file format: .{file_extension}")
         
-        # Basic file size check
-        if len(file_bytes) > 500 * 1024 * 1024:  # 500MB limit
-            return _error_result("File too large. Please upload files smaller than 500MB.")
+        # File size already validated in _read_upload_file()
         
         # Prepare settings
         settings = {
@@ -304,7 +313,7 @@ def submit_transcription(file, language, audio_format, diarization_enabled, spea
         
         # Submit job
         job_id = transcription_manager.submit_transcription(
-            file_bytes, original_filename, user.user_id, language, settings
+            file_path, original_filename, user.user_id, language, settings
         )
         
         # Update job state
@@ -396,6 +405,9 @@ def _dispatch_job_status(job, job_id, processing_time, user, stats_display):
 
     if job.status == 'failed':
         return _build_failed_result(job.error_message, processing_time, stats_display)
+
+    if job.status == 'enhancing':
+        return _build_in_progress_result("🎵 Enhancing audio quality...", f"Noise reduction & speech boost: {job.original_filename}", processing_time, stats_display)
 
     if job.status == 'processing':
         return _build_in_progress_result("🔄 Processing...", f"Converting and analyzing: {job.original_filename}", processing_time, stats_display)
@@ -827,7 +839,7 @@ def auto_refresh_ai_summary(summary_job_state, user, session_token=None):
         return (
             gr.update(),
             gr.update(),
-            gr.update(), gr.update(), gr.update(),
+            gr.update(), gr.update(),
             gr.update(),
             gr.update(value=""),
             gr.update()
@@ -1166,21 +1178,25 @@ def submit_ai_summary_new(transcript_text, transcript_file, document_files,
     if not ai_instructions or not ai_instructions.strip():
         default_prompts = {
             "รายงานการประชุมภายใน": (
+                "กรุณาระบุ: ชื่อโครงการ/หัวข้อประชุม, รายชื่อผู้พูด — "
                 "สรุปครบถ้วน เป็นทางการ แบ่งช่วงเวลา ระบุผู้รับผิดชอบ มติ/การตัดสินใจ "
-                "จัดกลุ่มประเด็นตามวาระ พร้อม Next Steps จัดกลุ่มตามผู้รับผิดชอบ "
+                "จัดกลุ่มประเด็น 4-8 หัวข้อหลัก พร้อม Next Steps จัดกลุ่มตามผู้รับผิดชอบ "
                 "ห้ามตกหล่นชื่อโปรเจกต์ ระบบ เครื่องมือ ตัวเลข"
             ),
             "บทสรุปสำหรับผู้บริหาร": (
+                "กรุณาระบุ: ชื่อโครงการ/หัวข้อประชุม, รายชื่อผู้พูด — "
                 "สรุปกระชับ เน้นมติสำคัญ Action Items ประเด็นติดตาม "
                 "เหมาะสำหรับผู้บริหารอ่านเร็ว ระบุผลลัพธ์หลักและตัวเลขสำคัญ "
                 "ห้ามตกหล่นการตัดสินใจหรือกำหนดเวลา"
             ),
             "รายงานการประชุมภายนอก": (
+                "กรุณาระบุ: ชื่อโครงการ/หัวข้อประชุม, รายชื่อผู้พูด, หน่วยงาน — "
                 "สรุปทางการ ระบุหน่วยงาน ผู้เข้าร่วม มติร่วม ข้อตกลง "
-                "แบ่งช่วงเวลา จัดกลุ่มประเด็นตามวาระ "
+                "แบ่งช่วงเวลา จัดกลุ่มประเด็น 4-8 หัวข้อหลัก "
                 "พร้อม Next Steps จัดกลุ่มตามผู้รับผิดชอบและหน่วยงาน"
             ),
             "บทสรุปการเรียนรู้หรืองานสัมมนา": (
+                "กรุณาระบุ: ชื่อหัวข้อสัมมนา, รายชื่อผู้บรรยาย — "
                 "สรุปประเด็นเรียนรู้ ผู้บรรยาย เครื่องมือ/ลิงก์อ้างอิง Use Cases "
                 "แบ่งช่วงเวลาตาม session พร้อมแหล่งข้อมูลเพิ่มเติม "
                 "ห้ามตกหล่นข้อมูลเชิงเทคนิค สถิติ หรือ Pain Points"
@@ -1301,7 +1317,7 @@ def create_transcript_file(transcript_text, job_id):
         filename = f"temp/transcript_{job_id[:8]}_{ts}.txt"
     
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(transcript_text)
+        f.write(transcript_text.encode("utf-8", errors="replace").decode("utf-8"))
     
     return filename
 
@@ -1337,7 +1353,7 @@ def create_summary_file(summary_text, job_id):
         filename = f"temp/ai_summary_{job_id[:8]}_{ts}.txt"
     
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(summary_text)
+        f.write(summary_text.encode("utf-8", errors="replace").decode("utf-8"))
     
     return filename
 
@@ -1461,32 +1477,36 @@ def restore_session_on_load(stored_ticket_token):
         )
 
 def check_session_validity(ticket_token):
-    """Periodically check if session ticket is still valid (60-min timeout)"""
+    """Periodically check if session ticket is still valid.
+    
+    Uses lightweight verify_token (HMAC + expiry only, NO blob storage call)
+    so this can run frequently without network I/O or transient-error risk.
+    Returns gr.update() (no-ops) when session is still valid to avoid
+    unnecessary UI re-renders that cause visual instability.
+    """
     try:
         if not ticket_token or ticket_token.strip() == "":
-            # No ticket to check
             return (
-                gr.update(),  # Don't change current_user
-                gr.update(),  # Don't change auth_section
-                gr.update(),  # Don't change main_app
-                gr.update()   # Don't change user_stats_display
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update()
             )
         
-        # Validate and refresh session (resets 60-min timer on server)
-        user = session_manager.validate_session(ticket_token)
+        # Lightweight check: HMAC signature + absolute expiry only
+        payload = session_manager.verify_token(ticket_token)
         
-        if user:
-            # Session ticket is still valid
-            stats_display = get_user_stats_display(user)
+        if payload is not None:
+            # Token signature valid and not expired — session is alive
             return (
-                user,
-                gr.update(visible=False),
-                gr.update(visible=True),
-                stats_display
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update()
             )
         else:
-            # Session ticket expired - force logout
-            print(f"⏰ Session ticket expired during check: {ticket_token[:12]}...")
+            # Token signature failed or absolute expiry (6h) reached
+            print(f"⏰ Session token expired during check: {ticket_token[:12]}...")
             return (
                 None,
                 gr.update(visible=True),
@@ -1495,7 +1515,8 @@ def check_session_validity(ticket_token):
             )
             
     except Exception as e:
-        print(f"❌ Session check error: {str(e)}")
+        # On ANY error, keep session alive — don't force logout
+        print(f"⚠️ Session check error (keeping session): {str(e)}")
         return (
             gr.update(),
             gr.update(),

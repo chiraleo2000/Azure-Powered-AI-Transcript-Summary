@@ -14,6 +14,12 @@ python-dotenv>=1.0.0
 # Audio/Video Processing (FFmpeg Python wrapper)
 ffmpeg-python==0.2.0
 
+# Audio Enhancement & Preprocessing
+noisereduce>=3.0.0
+scipy>=1.10.0
+pydub>=0.25.1
+soundfile>=0.12.0
+
 # AI and Machine Learning
 openai>=1.3.0
 tiktoken>=0.5.0

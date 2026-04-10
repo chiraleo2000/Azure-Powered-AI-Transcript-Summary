@@ -7,261 +7,213 @@ Desktop-first web app design
 SESSION_PERSISTENCE_JS = """
 <script>
 (function() {
-    // Session storage keys
     const SESSION_KEY = 'ai_conference_ticket';
     const ACTIVITY_KEY = 'ai_conference_last_activity';
     const TAB_KEY = 'ai_conference_last_tab';
     const TAB_INDEX_KEY = 'ai_conference_last_tab_index';
-    const INACTIVITY_TIMEOUT = 3600000; // 60 minutes in milliseconds
-    
-    // Get stored session ticket (survives page refresh)
+    const INACTIVITY_TIMEOUT = 3600000; // 60 minutes
+
+    // Guard against double-invocation of restore
+    let _sessionRestoreInProgress = false;
+    let _lastKnownSessionValue = '';
+
     window.getStoredSession = function() {
         try {
             const ticket = localStorage.getItem(SESSION_KEY);
             const lastActivity = localStorage.getItem(ACTIVITY_KEY);
-            
             if (!ticket) return null;
-            
-            // Check if local activity timeout exceeded
             if (lastActivity) {
-                const timeSinceActivity = Date.now() - parseInt(lastActivity);
-                if (timeSinceActivity > INACTIVITY_TIMEOUT) {
-                    console.log('🔐 Session ticket expired locally (60min inactive)');
+                const elapsed = Date.now() - parseInt(lastActivity);
+                if (elapsed > INACTIVITY_TIMEOUT) {
                     localStorage.removeItem(SESSION_KEY);
                     localStorage.removeItem(ACTIVITY_KEY);
-                    localStorage.removeItem(TAB_KEY);
-                    localStorage.removeItem(TAB_INDEX_KEY);
                     return null;
                 }
             }
-            
-            console.log('🔐 Restoring session ticket from storage');
             return ticket;
-        } catch (e) {
-            console.error('Session retrieval error:', e);
-            return null;
-        }
+        } catch (e) { return null; }
     };
-    
-    // Store session ticket (called after successful login)
+
     window.storeSession = function(ticketToken) {
         try {
-            if (ticketToken && ticketToken !== '') {
+            if (ticketToken && ticketToken.length > 20) {
                 localStorage.setItem(SESSION_KEY, ticketToken);
                 localStorage.setItem(ACTIVITY_KEY, Date.now().toString());
-                // Default to transcription tab after login
-                localStorage.setItem(TAB_KEY, 'transcription');
-                localStorage.setItem(TAB_INDEX_KEY, '0');
-                console.log('🔐 Session ticket stored for 60min persistence');
             }
-        } catch (e) {
-            console.error('Session storage error:', e);
-        }
+        } catch (e) {}
     };
-    
-    // Clear session (called on logout)
+
     window.clearSession = function() {
         try {
             localStorage.removeItem(SESSION_KEY);
             localStorage.removeItem(ACTIVITY_KEY);
             localStorage.removeItem(TAB_KEY);
             localStorage.removeItem(TAB_INDEX_KEY);
-            console.log('🔐 Session cleared');
-        } catch (e) {
-            console.error('Session clear error:', e);
-        }
+        } catch (e) {}
     };
-    
-    // Update activity timestamp (resets 60min timer)
+
     window.updateActivity = function() {
         try {
-            const ticket = localStorage.getItem(SESSION_KEY);
-            if (ticket) {
+            if (localStorage.getItem(SESSION_KEY)) {
                 localStorage.setItem(ACTIVITY_KEY, Date.now().toString());
             }
         } catch (e) {}
     };
-    
-    // Store current tab for restoration after refresh
+
     window.storeLastTab = function(tabName, tabIndex) {
         try {
             localStorage.setItem(TAB_KEY, tabName);
             if (tabIndex !== undefined) {
                 localStorage.setItem(TAB_INDEX_KEY, tabIndex.toString());
             }
-            console.log('📌 Tab stored:', tabName);
         } catch (e) {}
     };
-    
-    // Get last tab for restoration
+
     window.getLastTab = function() {
-        try {
-            return localStorage.getItem(TAB_KEY) || 'transcription';
-        } catch (e) {
-            return 'transcription';
-        }
+        try { return localStorage.getItem(TAB_KEY) || 'transcription'; }
+        catch (e) { return 'transcription'; }
     };
-    
-    // Get last tab index for restoration
+
     window.getLastTabIndex = function() {
-        try {
-            return parseInt(localStorage.getItem(TAB_INDEX_KEY) || '0');
-        } catch (e) {
-            return 0;
-        }
+        try { return parseInt(localStorage.getItem(TAB_INDEX_KEY) || '0'); }
+        catch (e) { return 0; }
     };
-    
-    // Track tab changes
+
+    function classifyTab(text) {
+        text = text.trim().toLowerCase();
+        if (text.includes('\u0e2a\u0e23\u0e38\u0e1b') || text.includes('ai')) return 'ai_summary';
+        if (text.includes('\u0e1b\u0e23\u0e30\u0e27\u0e31\u0e15\u0e34') || text.includes('history')) return 'history';
+        if (text.includes('\u0e15\u0e31\u0e49\u0e07\u0e04\u0e48\u0e32') || text.includes('settings')) return 'settings';
+        if (text.includes('\u0e0a\u0e48\u0e27\u0e22\u0e40\u0e2b\u0e25\u0e37\u0e2d') || text.includes('help')) return 'help';
+        return 'transcription';
+    }
+
     function setupTabTracking() {
-        // Direct click listener is most reliable
-        setTimeout(function() {
-            const tabButtons = document.querySelectorAll('.tab-nav button');
+        function trySetup(attempt) {
+            var tabButtons = document.querySelectorAll('.tab-nav button');
+            if (tabButtons.length === 0 && attempt < 10) {
+                setTimeout(function() { trySetup(attempt + 1); }, 300);
+                return;
+            }
             tabButtons.forEach(function(btn, index) {
                 btn.addEventListener('click', function() {
-                    const tabText = btn.textContent.trim().toLowerCase();
-                    let tabName = 'transcription';
-                    if (tabText.includes('สรุป') || tabText.includes('ai')) tabName = 'ai_summary';
-                    else if (tabText.includes('ประวัติ') || tabText.includes('history')) tabName = 'history';
-                    else if (tabText.includes('ตั้งค่า') || tabText.includes('settings')) tabName = 'settings';
-                    else if (tabText.includes('ช่วยเหลือ') || tabText.includes('help')) tabName = 'help';
-                    window.storeLastTab(tabName, index);
+                    window.storeLastTab(classifyTab(btn.textContent), index);
                 });
             });
-            console.log('📌 Tab tracking setup complete for', tabButtons.length, 'tabs');
-        }, 500);
+        }
+        trySetup(0);
     }
-    
-    // Restore tab after page load with retry mechanism
+
     function restoreTab(retryCount) {
         retryCount = retryCount || 0;
-        const maxRetries = 5;
-        
-        const lastTab = window.getLastTab();
-        const lastTabIndex = window.getLastTabIndex();
-        
-        // Always try to restore to the last tab
-        const tabButtons = document.querySelectorAll('.tab-nav button');
-        
-        if (tabButtons.length === 0 && retryCount < maxRetries) {
-            // Tabs not loaded yet, retry
-            setTimeout(function() { restoreTab(retryCount + 1); }, 500);
+        var lastTab = window.getLastTab();
+        var lastTabIndex = window.getLastTabIndex();
+        var tabButtons = document.querySelectorAll('.tab-nav button');
+
+        if (tabButtons.length === 0 && retryCount < 10) {
+            setTimeout(function() { restoreTab(retryCount + 1); }, 300);
             return;
         }
-        
-        // Find and click the correct tab
-        let foundTab = false;
+
+        // Only restore non-default tabs (0 = transcription is default)
+        if (lastTabIndex === 0 && lastTab === 'transcription') return;
+
+        var foundTab = false;
         tabButtons.forEach(function(btn, index) {
-            const tabText = btn.textContent.trim().toLowerCase();
-            let tabName = 'transcription';
-            if (tabText.includes('สรุป') || tabText.includes('ai')) tabName = 'ai_summary';
-            else if (tabText.includes('ประวัติ') || tabText.includes('history')) tabName = 'history';
-            else if (tabText.includes('ตั้งค่า') || tabText.includes('settings')) tabName = 'settings';
-            else if (tabText.includes('ช่วยเหลือ') || tabText.includes('help')) tabName = 'help';
-            
-            if (tabName === lastTab && !foundTab) {
+            if (!foundTab && classifyTab(btn.textContent) === lastTab) {
                 foundTab = true;
-                // Force click after a delay to ensure UI is ready
-                setTimeout(function() {
-                    btn.click();
-                    console.log('🔄 Restored to tab:', lastTab);
-                }, 200);
+                btn.click();
             }
         });
-        
         if (!foundTab && lastTabIndex > 0 && lastTabIndex < tabButtons.length) {
-            // Fallback: use index
-            setTimeout(function() {
-                tabButtons[lastTabIndex].click();
-                console.log('🔄 Restored to tab index:', lastTabIndex);
-            }, 200);
+            tabButtons[lastTabIndex].click();
         }
     }
-    
-    // Activity tracking on user interactions
-    ['mousedown', 'keydown', 'scroll', 'touchstart', 'click'].forEach(function(event) {
-        document.addEventListener(event, window.updateActivity, true);
+
+    // Activity tracking — throttled to max once per 5s
+    var _lastActivityUpdate = 0;
+    function throttledActivity() {
+        var now = Date.now();
+        if (now - _lastActivityUpdate > 5000) {
+            _lastActivityUpdate = now;
+            window.updateActivity();
+        }
+    }
+    ['mousedown', 'keydown', 'scroll', 'touchstart'].forEach(function(evt) {
+        document.addEventListener(evt, throttledActivity, { passive: true, capture: true });
     });
-    
-    // Watch for session_id_hidden changes to detect login/logout
-    // IMPORTANT: Target the inner textarea/input, not the wrapper div
-    function watchSessionInput() {
-        const container = document.getElementById('session_id_hidden');
-        if (container) {
-            // Find the actual input element inside the Gradio component
-            const input = container.querySelector('textarea') || container.querySelector('input');
-            if (input) {
-                // Watch for value changes via input events (triggered by Gradio)
-                input.addEventListener('input', function() {
-                    const newValue = input.value;
-                    if (newValue && newValue.length > 20) {
-                        window.storeSession(newValue);
-                    } else if (!newValue || newValue === '') {
-                        window.clearSession();
-                    }
-                });
-                
-                // Also use MutationObserver on the input element for attribute changes
-                const observer = new MutationObserver(function(mutations) {
-                    mutations.forEach(function(mutation) {
-                        if (mutation.type === 'attributes') {
-                            const newValue = input.value;
-                            if (newValue && newValue.length > 20) {
-                                window.storeSession(newValue);
-                            } else if (!newValue || newValue === '') {
-                                window.clearSession();
-                            }
-                        }
-                    });
-                });
-                observer.observe(input, { attributes: true });
-                
-                console.log('🔐 Session input watcher attached to inner element');
-            } else {
-                // Fallback: watch the container div for bubbling events
-                container.addEventListener('input', function(e) {
-                    const target = e.target;
-                    if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')) {
-                        const newValue = target.value;
-                        if (newValue && newValue.length > 20) {
-                            window.storeSession(newValue);
-                        } else if (!newValue || newValue === '') {
-                            window.clearSession();
-                        }
-                    }
-                });
-                console.log('🔐 Session input watcher attached to container (fallback)');
-            }
-        }
+
+    // Polling-based watcher for session_id_hidden (most reliable with Gradio)
+    function startSessionPoller() {
+        setInterval(function() {
+            try {
+                var container = document.getElementById('session_id_hidden');
+                if (!container) return;
+                var input = container.querySelector('textarea') || container.querySelector('input');
+                if (!input) return;
+                var val = input.value || '';
+                if (val === _lastKnownSessionValue) return;
+                _lastKnownSessionValue = val;
+                if (val.length > 20) {
+                    window.storeSession(val);
+                } else if (val === '') {
+                    window.clearSession();
+                }
+            } catch (e) {}
+        }, 400);
     }
-    
+
+    // Also listen for direct events as a fast path
+    function attachInputListener() {
+        var container = document.getElementById('session_id_hidden');
+        if (!container) return;
+        var input = container.querySelector('textarea') || container.querySelector('input');
+        if (!input || input._sessionListenerAttached) return;
+        input._sessionListenerAttached = true;
+        input.addEventListener('input', function() {
+            var val = input.value || '';
+            if (val === _lastKnownSessionValue) return;
+            _lastKnownSessionValue = val;
+            if (val.length > 20) window.storeSession(val);
+            else if (val === '') window.clearSession();
+        });
+    }
+
     // On page load: restore session and tab
     window.addEventListener('load', function() {
-        const storedTicket = window.getStoredSession();
+        attachInputListener();
+        startSessionPoller();
+        setupTabTracking();
+
+        var storedTicket = window.getStoredSession();
         if (storedTicket) {
-            // Find the actual input inside the Gradio component wrapper
-            const container = document.getElementById('session_id_hidden');
+            // Inject stored ticket into the Gradio input so demo.load can read it
+            var container = document.getElementById('session_id_hidden');
             if (container) {
-                const input = container.querySelector('textarea') || container.querySelector('input');
+                var input = container.querySelector('textarea') || container.querySelector('input');
                 if (input) {
+                    _lastKnownSessionValue = storedTicket;
                     input.value = storedTicket;
                     input.dispatchEvent(new Event('input', { bubbles: true }));
                     input.dispatchEvent(new Event('change', { bubbles: true }));
-                    console.log('🔐 Session ticket sent to Gradio via inner input element');
                 }
             }
-            
-            // Restore tab after a delay to ensure main app is visible
-            setTimeout(function() { restoreTab(0); }, 1500);
+            // Restore tab once the main_app div becomes visible
+            function waitForMainApp(attempt) {
+                attempt = attempt || 0;
+                var mainApp = document.getElementById('main_app_section');
+                if (mainApp && mainApp.offsetParent !== null) {
+                    restoreTab(0);
+                    return;
+                }
+                if (attempt < 20) {
+                    setTimeout(function() { waitForMainApp(attempt + 1); }, 250);
+                }
+            }
+            waitForMainApp(0);
         }
-        
-        // Setup tab tracking
-        setupTabTracking();
-        
-        // Watch session input for changes
-        setTimeout(watchSessionInput, 500);
     });
-    
-    // Before page unload: update activity time
+
     window.addEventListener('beforeunload', function() {
         window.updateActivity();
     });
