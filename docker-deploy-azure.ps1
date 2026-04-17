@@ -8,16 +8,16 @@ param(
     [string]$ResourceGroup = "AI-Summary-Internal",
     
     [Parameter(Mandatory=$false)]
-    [string]$AppServiceName = "ai-transcript-summarize-service",
+    [string]$AppServiceName = "ai-summarize-service",
     
     [Parameter(Mandatory=$false)]
-    [string]$ACRName = "ocrservicecontainer",
+    [string]$ACRName = "",
     
     [Parameter(Mandatory=$false)]
-    [string]$ImageName = "ai-summary-meeting",
+    [string]$ImageName = "ai-summary-app",
     
     [Parameter(Mandatory=$false)]
-    [string]$Tag = "0.1.38",
+    [string]$Tag = "latest",
     
     [Parameter(Mandatory=$false)]
     [switch]$SkipBuild = $false,
@@ -84,7 +84,7 @@ if (!$ACRName) {
 }
 
 # Get ACR login server
-$acrLoginServer = az acr show --name $ACRName --query "loginServer" -o tsv
+$acrLoginServer = az acr show --name $ACRName --resource-group $ResourceGroup --query "loginServer" -o tsv
 Write-Host "   Login server: $acrLoginServer" -ForegroundColor Gray
 
 # Check Docker is running
@@ -118,15 +118,10 @@ if (!$SkipBuild) {
 
 # Login to ACR
 Write-Host "`n🔐 Logging in to Azure Container Registry..." -ForegroundColor Cyan
-$acrCreds = az acr credential show --name $ACRName -o json | ConvertFrom-Json
-docker login $acrLoginServer -u $acrCreds.username -p $acrCreds.passwords[0].value 2>$null
+az acr login --name $ACRName
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "⚠️  Admin credential login failed, trying az acr login..." -ForegroundColor Yellow
-    az acr login --name $ACRName
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "❌ ACR login failed!" -ForegroundColor Red
-        exit 1
-    }
+    Write-Host "❌ ACR login failed!" -ForegroundColor Red
+    exit 1
 }
 Write-Host "✅ Logged in to ACR" -ForegroundColor Green
 
@@ -156,10 +151,8 @@ Write-Host "   Enabling ACR integration..." -ForegroundColor Gray
 az webapp config container set `
     --name $AppServiceName `
     --resource-group $ResourceGroup `
-    --container-image-name $fullImageName `
-    --container-registry-url "https://${acrLoginServer}" `
-    --container-registry-user $acrCreds.username `
-    --container-registry-password $acrCreds.passwords[0].value
+    --docker-custom-image-name $fullImageName `
+    --docker-registry-server-url "https://${acrLoginServer}"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "❌ Failed to configure App Service!" -ForegroundColor Red

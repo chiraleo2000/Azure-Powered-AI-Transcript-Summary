@@ -40,7 +40,7 @@ class FileProcessor:
         self.max_pages_pdf = 500
         self.max_sheets_excel = 50
     
-    def process_file(self, file_path: str, extension: str = None) -> Optional[str]:
+    def process_file(self, file_path: str, extension: Optional[str] = None) -> Optional[str]:
         """Process a file and extract its text content with enhanced error handling"""
         try:
             if not os.path.exists(file_path):
@@ -82,6 +82,22 @@ class FileProcessor:
             print(f"Error processing file {file_path}: {e}")
             return f"Error processing file: {str(e)}"
     
+    def _try_pdfplumber_extraction(self, file_path: str) -> List[str]:
+        """Fallback PDF extraction using pdfplumber"""
+        try:
+            import pdfplumber
+            text_content = []
+            with pdfplumber.open(file_path) as pdf:
+                for page_num, page in enumerate(pdf.pages[:self.max_pages_pdf]):
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_content.append(f"--- Page {page_num + 1} ---")
+                        text_content.append(page_text)
+                        text_content.append("")
+            return text_content
+        except ImportError:
+            return []
+
     def _process_pdf(self, file_path: str) -> Optional[str]:
         """Extract text from PDF files with enhanced handling"""
         try:
@@ -108,16 +124,10 @@ class FileProcessor:
                 
                 if not text_content:
                     # Try alternative PDF processing with pdfplumber if available
-                    try:
-                        import pdfplumber
-                        with pdfplumber.open(file_path) as pdf:
-                            for page_num, page in enumerate(pdf.pages[:self.max_pages_pdf]):
-                                page_text = page.extract_text()
-                                if page_text:
-                                    text_content.append(f"--- Page {page_num + 1} ---")
-                                    text_content.append(page_text)
-                                    text_content.append("")
-                    except ImportError:
+                    fallback = self._try_pdfplumber_extraction(file_path)
+                    if fallback:
+                        text_content = fallback
+                    else:
                         return "PDF contains non-text content or requires advanced processing"
                 
                 return "\n".join(text_content) if text_content else None
@@ -205,6 +215,40 @@ class FileProcessor:
             print(f"Error processing DOC: {e}")
             return None
     
+    def _extract_pptx_shape_texts(self, shapes) -> List[str]:
+        """Extract text lines from PPTX shapes"""
+        lines = []
+        for shape in shapes:
+            if not (hasattr(shape, "text") and shape.text.strip()):  # type: ignore[union-attr]
+                continue
+            if hasattr(shape, 'placeholder_format') and shape.placeholder_format:
+                if shape.placeholder_format.type == 1:  # Title
+                    lines.append(f"TITLE: {shape.text}")  # type: ignore[union-attr]
+                else:
+                    lines.append(shape.text)  # type: ignore[union-attr]
+            else:
+                lines.append(shape.text)  # type: ignore[union-attr]
+        return lines
+
+    def _extract_pptx_table_texts(self, shapes) -> List[str]:
+        """Extract text rows from PPTX tables"""
+        lines = []
+        for shape in shapes:
+            if shape.has_table:
+                lines.append("TABLE:")
+                table = shape.table  # type: ignore[union-attr]
+                for row in table.rows:
+                    lines.append(" | ".join(cell.text.strip() for cell in row.cells))
+        return lines
+
+    def _extract_pptx_notes(self, slide) -> Optional[str]:
+        """Extract speaker notes from a PPTX slide"""
+        if slide.has_notes_slide:
+            notes_tf = slide.notes_slide.notes_text_frame
+            if notes_tf is not None and notes_tf.text.strip():
+                return f"NOTES: {notes_tf.text}"
+        return None
+
     def _process_pptx(self, file_path: str) -> Optional[str]:
         """Extract text from PPTX files with enhanced slide handling"""
         try:
@@ -212,35 +256,12 @@ class FileProcessor:
             text_content = []
             
             for slide_num, slide in enumerate(presentation.slides, 1):
-                slide_text = []
-                slide_text.append(f"--- Slide {slide_num} ---")
-                
-                # Extract text from shapes
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text.strip():
-                        # Check if it's a title or content
-                        if hasattr(shape, 'placeholder_format') and shape.placeholder_format:
-                            if shape.placeholder_format.type == 1:  # Title
-                                slide_text.append(f"TITLE: {shape.text}")
-                            else:
-                                slide_text.append(shape.text)
-                        else:
-                            slide_text.append(shape.text)
-                
-                # Extract table content if present
-                for shape in slide.shapes:
-                    if shape.has_table:
-                        slide_text.append("TABLE:")
-                        table = shape.table
-                        for row in table.rows:
-                            row_text = [cell.text.strip() for cell in row.cells]
-                            slide_text.append(" | ".join(row_text))
-                
-                # Extract notes
-                if slide.has_notes_slide:
-                    notes_text = slide.notes_slide.notes_text_frame.text
-                    if notes_text.strip():
-                        slide_text.append(f"NOTES: {notes_text}")
+                slide_text = [f"--- Slide {slide_num} ---"]
+                slide_text.extend(self._extract_pptx_shape_texts(slide.shapes))
+                slide_text.extend(self._extract_pptx_table_texts(slide.shapes))
+                notes = self._extract_pptx_notes(slide)
+                if notes:
+                    slide_text.append(notes)
                 
                 if len(slide_text) > 1:  # More than just the slide header
                     text_content.extend(slide_text)
@@ -281,6 +302,19 @@ class FileProcessor:
             print(f"Error processing PPT: {e}")
             return None
     
+    def _extract_xlsx_sheet_rows(self, sheet, max_row: int, max_col: int) -> List[List[str]]:
+        """Extract non-empty rows from an xlsx sheet"""
+        data = []
+        for row in sheet.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col, values_only=True):
+            if not any(cell is not None for cell in row):
+                continue
+            row_data = [str(cell) if cell is not None else "" for cell in row]
+            while row_data and not row_data[-1]:
+                row_data.pop()
+            if row_data:
+                data.append(row_data)
+        return data
+
     def _process_xlsx(self, file_path: str) -> Optional[str]:
         """Extract text from XLSX files with enhanced sheet handling"""
         try:
@@ -296,24 +330,12 @@ class FileProcessor:
                 sheet = workbook[sheet_name]
                 text_content.append(f"--- Sheet: {sheet_name} ---")
                 
-                # Get data dimensions
-                max_row = min(sheet.max_row, 1000)  # Limit rows
-                max_col = min(sheet.max_column, 100)  # Limit columns
-                
-                # Extract data efficiently
-                data = []
-                for row in sheet.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col, values_only=True):
-                    if any(cell is not None for cell in row):
-                        row_data = [str(cell) if cell is not None else "" for cell in row]
-                        # Remove trailing empty cells
-                        while row_data and not row_data[-1]:
-                            row_data.pop()
-                        if row_data:
-                            data.append(row_data)
+                max_row = min(sheet.max_row, 1000)
+                max_col = min(sheet.max_column, 100)
+                data = self._extract_xlsx_sheet_rows(sheet, max_row, max_col)
                 
                 if data:
-                    # Format as table
-                    for row in data[:100]:  # Limit to first 100 rows per sheet
+                    for row in data[:100]:
                         text_content.append(" | ".join(row))
                 else:
                     text_content.append("[Empty sheet]")
@@ -379,7 +401,7 @@ class FileProcessor:
                     detected = chardet.detect(raw_data)
                     if detected['encoding'] and detected['confidence'] > 0.7:
                         encoding = detected['encoding']
-            except:
+            except Exception:
                 pass
             
             # Try reading with detected encoding
@@ -430,7 +452,7 @@ class FileProcessor:
                     detected = chardet.detect(raw_data)
                     if detected['encoding'] and detected['confidence'] > 0.7:
                         encoding = detected['encoding']
-            except:
+            except Exception:
                 pass
             
             # Try reading with detected encoding first
@@ -483,7 +505,7 @@ class FileProcessor:
         try:
             # Try with striprtf if available
             try:
-                from striprtf.striprtf import rtf_to_text
+                from striprtf.striprtf import rtf_to_text  # type: ignore[import-untyped]
                 with open(file_path, 'r', encoding='utf-8') as file:
                     rtf_content = file.read()
                 return rtf_to_text(rtf_content)
@@ -638,7 +660,7 @@ class FileProcessor:
                 'type': 'unknown'
             }
     
-    def _format_file_size(self, size_bytes: int) -> str:
+    def _format_file_size(self, size_bytes: float) -> str:
         """Format file size in human readable format"""
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size_bytes < 1024.0:

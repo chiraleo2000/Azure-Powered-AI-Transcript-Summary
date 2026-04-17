@@ -5,7 +5,7 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies including ffmpeg and audio libs
+# Install system dependencies including ffmpeg
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libgl1 \
@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code (only what's needed)
 COPY app.py app_func.py backend.py ai_summary.py session_manager.py \
      file_processors.py image_extraction.py error_logger.py \
-     azure_keyvault_client.py config.py audio_preprocessing.py ./
+     audio_enhancer.py azure_keyvault_client.py config.py ./
 COPY src/ ./src/
 COPY static/ ./static/
 

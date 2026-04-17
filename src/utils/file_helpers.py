@@ -65,5 +65,5 @@ def is_file_too_large(filepath: str, max_size_mb: int = 200) -> bool:
     try:
         size = os.path.getsize(filepath)
         return size > max_size_mb * 1024 * 1024
-    except:
+    except Exception:
         return False

@@ -99,11 +99,27 @@ class VideoFrameExtractor:
             self.min_time_between_frames = 2.0
             self.max_frames = 50
     
+    def _try_save_content_frame(self, frame, current_time: float, frame_number: int,
+                                  prev_frame, extracted_frames: List[Dict]) -> Optional[object]:
+        """Try to save a frame if significant and quality sufficient. Returns updated prev_frame."""
+        is_significant = self._is_significant_change(frame, prev_frame)
+        if not (is_significant or prev_frame is None):
+            return prev_frame
+        if not self._is_frame_quality_sufficient(frame):
+            return prev_frame
+        saved_frame = self._save_frame(frame, current_time, frame_number)
+        if saved_frame:
+            saved_frame.update(self._analyze_frame_content(frame))
+            extracted_frames.append(saved_frame)
+            print(f"Extracted frame at {current_time:.1f}s (quality score: {saved_frame.get('quality_score', 'unknown')})")
+            return self._preprocess_frame(frame)
+        return prev_frame
+
     def _extract_content_frames(self, cap: cv2.VideoCapture, fps: float) -> List[Dict]:
         """Extract frames based on content similarity analysis with enhanced detection"""
         extracted_frames = []
         prev_frame = None
-        prev_frame_time = -self.min_time_between_frames
+        prev_frame_time = -(self.min_time_between_frames or 0.0)
         frame_number = 0
         
         # Calculate frame skip for efficiency
@@ -122,29 +138,15 @@ class VideoFrameExtractor:
                 continue
             
             # Ensure minimum time between extractions
-            if current_time - prev_frame_time < self.min_time_between_frames:
+            if self.min_time_between_frames is not None and current_time - prev_frame_time < self.min_time_between_frames:
                 frame_number += 1
                 continue
             
-            # Process frame
             try:
-                is_significant = self._is_significant_change(frame, prev_frame)
-                
-                if is_significant or prev_frame is None:
-                    # Additional quality checks
-                    if self._is_frame_quality_sufficient(frame):
-                        # Save frame
-                        saved_frame = self._save_frame(frame, current_time, frame_number)
-                        if saved_frame:
-                            # Add additional metadata
-                            saved_frame.update(self._analyze_frame_content(frame))
-                            extracted_frames.append(saved_frame)
-                            prev_frame_time = current_time
-                            
-                            # Update previous frame for comparison
-                            prev_frame = self._preprocess_frame(frame)
-                            print(f"Extracted frame at {current_time:.1f}s (quality score: {saved_frame.get('quality_score', 'unknown')})")
-                
+                new_prev = self._try_save_content_frame(frame, current_time, frame_number, prev_frame, extracted_frames)
+                if new_prev is not prev_frame:
+                    prev_frame_time = current_time
+                prev_frame = new_prev
             except Exception as e:
                 print(f"Error processing frame {frame_number}: {e}")
             
@@ -152,6 +154,47 @@ class VideoFrameExtractor:
         
         return extracted_frames
     
+    def _try_save_presentation_frame(self, frame, current_time: float, frame_number: int,
+                                       prev_frame, extracted_frames: List[Dict],
+                                       threshold: float) -> Optional[object]:
+        """Try to save a presentation frame if a slide change is detected. Returns updated prev_frame."""
+        is_slide_change = self._detect_slide_change(frame, prev_frame, threshold)
+        if not (is_slide_change or prev_frame is None):
+            return prev_frame
+        if not self._is_presentation_content(frame):
+            return prev_frame
+        saved_frame = self._save_frame(frame, current_time, frame_number)
+        if saved_frame:
+            saved_frame.update({
+                'content_type': 'presentation',
+                'slide_detected': True,
+                'text_density': self._calculate_text_density(frame)
+            })
+            extracted_frames.append(saved_frame)
+            print(f"Extracted slide at {current_time:.1f}s")
+            return self._preprocess_frame(frame)
+        return prev_frame
+
+    def _try_save_meeting_frame(self, frame, current_time: float, frame_number: int,
+                                 prev_frame, extracted_frames: List[Dict]) -> Optional[object]:
+        """Try to save a meeting frame if a scene change is detected. Returns updated prev_frame."""
+        is_scene_change = self._detect_scene_change(frame, prev_frame)
+        if not (is_scene_change or prev_frame is None):
+            return prev_frame
+        if not self._is_meeting_content(frame):
+            return prev_frame
+        saved_frame = self._save_frame(frame, current_time, frame_number)
+        if saved_frame:
+            saved_frame.update({
+                'content_type': 'meeting',
+                'scene_change': True,
+                'people_detected': self._detect_people_presence(frame)
+            })
+            extracted_frames.append(saved_frame)
+            print(f"Extracted meeting scene at {current_time:.1f}s")
+            return self._preprocess_frame(frame)
+        return prev_frame
+
     def _extract_presentation_frames(self, cap: cv2.VideoCapture, fps: float) -> List[Dict]:
         """Extract frames optimized for presentation content (slides, screen sharing)"""
         extracted_frames = []
@@ -174,22 +217,10 @@ class VideoFrameExtractor:
                 continue
             
             try:
-                # For presentations, focus on structural changes
-                is_slide_change = self._detect_slide_change(frame, prev_frame, slide_change_threshold)
-                
-                if is_slide_change or prev_frame is None:
-                    if self._is_presentation_content(frame):
-                        saved_frame = self._save_frame(frame, current_time, frame_number)
-                        if saved_frame:
-                            saved_frame.update({
-                                'content_type': 'presentation',
-                                'slide_detected': True,
-                                'text_density': self._calculate_text_density(frame)
-                            })
-                            extracted_frames.append(saved_frame)
-                            prev_frame = self._preprocess_frame(frame)
-                            print(f"Extracted slide at {current_time:.1f}s")
-                
+                prev_frame = self._try_save_presentation_frame(
+                    frame, current_time, frame_number, prev_frame,
+                    extracted_frames, slide_change_threshold
+                )
             except Exception as e:
                 print(f"Error processing presentation frame {frame_number}: {e}")
             
@@ -218,22 +249,9 @@ class VideoFrameExtractor:
                 continue
             
             try:
-                # For meetings, look for scene changes or new speakers
-                is_scene_change = self._detect_scene_change(frame, prev_frame)
-                
-                if is_scene_change or prev_frame is None:
-                    if self._is_meeting_content(frame):
-                        saved_frame = self._save_frame(frame, current_time, frame_number)
-                        if saved_frame:
-                            saved_frame.update({
-                                'content_type': 'meeting',
-                                'scene_change': True,
-                                'people_detected': self._detect_people_presence(frame)
-                            })
-                            extracted_frames.append(saved_frame)
-                            prev_frame = self._preprocess_frame(frame)
-                            print(f"Extracted meeting scene at {current_time:.1f}s")
-                
+                prev_frame = self._try_save_meeting_frame(
+                    frame, current_time, frame_number, prev_frame, extracted_frames
+                )
             except Exception as e:
                 print(f"Error processing meeting frame {frame_number}: {e}")
             
@@ -319,7 +337,7 @@ class VideoFrameExtractor:
             
             return slide_similarity < threshold
             
-        except Exception as e:
+        except Exception:
             return False
     
     def _detect_scene_change(self, current_frame: np.ndarray, prev_frame: Optional[np.ndarray]) -> bool:
@@ -336,7 +354,7 @@ class VideoFrameExtractor:
             # Higher threshold for scene changes (less sensitive)
             return hist_similarity < 0.70
             
-        except Exception as e:
+        except Exception:
             return False
     
     def _is_frame_quality_sufficient(self, frame: np.ndarray) -> bool:
@@ -393,7 +411,7 @@ class VideoFrameExtractor:
             
             # Check for reasonable contrast and detail
             contrast = np.std(gray)
-            return contrast > 20  # Has some detail/variation
+            return bool(contrast > 20)  # Has some detail/variation
             
         except Exception:
             return True
@@ -523,7 +541,7 @@ class VideoFrameExtractor:
         """Calculate similarity of text regions (useful for presentation analysis)"""
         try:
             # Use MSER to detect text-like regions
-            mser = cv2.MSER_create()
+            mser = cv2.MSER_create()  # type: ignore[attr-defined]
             
             regions1, _ = mser.detectRegions(frame1)
             regions2, _ = mser.detectRegions(frame2)
@@ -685,6 +703,7 @@ class ImageAnalyzer:
     """Enhanced image analysis utilities for conference content"""
     
     def __init__(self):
+        # No initialization needed
         pass
     
     def detect_slide_content(self, image_path: str) -> Dict:
@@ -734,7 +753,7 @@ class ImageAnalyzer:
             
             # Method 1: MSER (Maximally Stable Extremal Regions)
             try:
-                mser = cv2.MSER_create()
+                mser = cv2.MSER_create()  # type: ignore[attr-defined]
                 mser_regions, _ = mser.detectRegions(gray_image)
                 regions.extend(mser_regions)
             except Exception:
@@ -753,7 +772,7 @@ class ImageAnalyzer:
                 for contour in contours:
                     area = cv2.contourArea(contour)
                     if 100 < area < 10000:  # Filter by reasonable text size
-                        x, y, w, h = cv2.boundingRect(contour)
+                        _, _, w, h = cv2.boundingRect(contour)
                         aspect_ratio = w / h
                         if 0.1 < aspect_ratio < 10:  # Reasonable aspect ratio for text
                             text_contours.append(contour)
