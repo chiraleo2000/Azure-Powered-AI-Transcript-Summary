@@ -1,15 +1,22 @@
 """
 Audio Enhancement Module for Azure AI Transcript Summary
-Provides tiered audio quality improvement before transcription:
-  - minimal:  No enhancement (pass-through)
-  - standard: FFmpeg DSP filters (highpass, lowpass, dynaudnorm, acompressor)
-  - advanced: Full pipeline — FFmpeg DSP → noisereduce spectral gating → Resemble Enhance
+
+Tiered pipelines optimised for speech-to-text with an emphasis on
+keeping quiet phrases audible:
+
+  - minimal  : pass-through
+  - standard : FFmpeg DSP — highpass/lowpass, light spectral denoise,
+               makeup-gain compressor, EBU R128 loudness normalisation
+               to -18 LUFS (fixes "some parts quiet, some parts fine").
+  - advanced : adaptive profile selection (clean vs noisy room) +
+               gentler noisereduce (prop_decrease ~0.55) +
+               final LUFS target pass. Equivalent to the "เน้นคุณภาพ"
+               profile — noticeably better than the standard chain.
 """
 
 import os
-import subprocess
+import subprocess  # nosec B404 - ffmpeg invoked with fixed argv, no shell
 import tempfile
-import time
 from typing import Any, Optional, Tuple, List
 
 import numpy as np
@@ -148,6 +155,17 @@ class AudioEnhancer:
         else:
             print(f"[AUDIO] [{fname}]   Stage 3/3: SKIPPED (resemble-enhance not installed)")
 
+        # Stage 4 — final EBU R128 loudness pass. Guarantees the "เน้นคุณภาพ"
+        # tier ends at -18 LUFS regardless of what earlier stages did to
+        # dynamics, so quiet phrases stay audible.
+        print(f"[AUDIO] [{fname}]   Stage 4/4: EBU R128 loudness normalise (-18 LUFS)")
+        result, err = self._apply_loudnorm(current)
+        if err:
+            print(f"[AUDIO] [{fname}]   Loudness normalise failed: {err} — continuing with previous")
+        else:
+            current = result
+            print(f"[AUDIO] [{fname}]   Loudness normalise complete: {len(current) / 1024 / 1024:.2f} MB")
+
         print(f"[AUDIO] [{fname}] Advanced pipeline finished: {len(current) / 1024 / 1024:.2f} MB")
         return current, None
 
@@ -155,8 +173,48 @@ class AudioEnhancer:
     # Stage 1 — Classic DSP via FFmpeg
     # ------------------------------------------------------------------
 
+    # EBU R128 loudness target for speech workflows. The analysis recommends
+    # -20 to -18 LUFS; -18 LUFS keeps headroom while lifting quiet passages.
+    _LUFS_TARGET = "-18"
+    _TRUE_PEAK = "-1.5"
+    _LRA = "11"
+
+    # Speech-friendly bandpass. Keep more high-frequency energy than a phone
+    # filter so weak consonants survive; still rolls off sibilance above 8 kHz.
+    _BANDPASS = "highpass=f=80,lowpass=f=8000"
+
+    # Light FFT denoise. Gentler than a hard noise gate so soft tails and
+    # phrase starts are not chopped off.
+    _SOFT_DENOISE = "afftdn=nr=12:nf=-40:tn=1"
+
+    # Makeup-gain compressor replaces the old threshold-only compressor.
+    # Lower threshold + lighter ratio + explicit makeup lifts soft phrases
+    # without pumping the loud ones.
+    _COMPRESSOR = (
+        "acompressor=threshold=-22dB:ratio=2:attack=5:release=50:makeup=4"
+    )
+
+    def _loudnorm_chain(self) -> str:
+        """EBU R128 two-pass-style single-pass loudnorm string."""
+        return (
+            f"loudnorm=I={self._LUFS_TARGET}:"
+            f"TP={self._TRUE_PEAK}:LRA={self._LRA}"
+        )
+
     def _enhance_dsp(self, wav_bytes: bytes) -> Tuple[bytes, Optional[str]]:
-        """Apply FFmpeg highpass + lowpass + dynaudnorm + acompressor filters."""
+        """Speech-optimised FFmpeg chain with LUFS normalisation.
+
+        Replaces the previous ``highpass=200, lowpass=3000, dynaudnorm,
+        acompressor`` chain with:
+
+        1. ``highpass=80, lowpass=8000``  — preserve consonants
+        2. ``afftdn``                      — soft FFT denoise (instead of
+           a hard noise gate that nibbles phrase starts)
+        3. ``acompressor ... makeup=4``    — lift soft speech without
+           pumping loud speech
+        4. ``loudnorm I=-18``              — EBU R128 loudness target so
+           the whole file sits at a consistent level
+        """
         temp_in = None
         temp_out = None
         try:
@@ -167,10 +225,17 @@ class AudioEnhancer:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 temp_out = f.name
 
+            af_chain = ",".join([
+                self._BANDPASS,
+                self._SOFT_DENOISE,
+                self._COMPRESSOR,
+                self._loudnorm_chain(),
+            ])
+
             cmd = [
                 "ffmpeg",
                 "-i", temp_in,
-                "-af", "highpass=f=200,lowpass=f=3000,dynaudnorm,acompressor",
+                "-af", af_chain,
                 "-acodec", "pcm_s16le",
                 "-ar", "16000",
                 "-ac", "1",
@@ -178,7 +243,9 @@ class AudioEnhancer:
                 temp_out,
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            result = subprocess.run(  # nosec B603 - fixed argv, no shell
+                cmd, capture_output=True, text=True, timeout=1800, check=False
+            )
             if result.returncode != 0:
                 return wav_bytes, f"FFmpeg DSP failed: {result.stderr[:500]}"
 
@@ -195,7 +262,7 @@ class AudioEnhancer:
 
         except subprocess.TimeoutExpired:
             return wav_bytes, "FFmpeg DSP timed out"
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return wav_bytes, f"FFmpeg DSP error: {e}"
         finally:
             for p in (temp_in, temp_out):
@@ -206,11 +273,58 @@ class AudioEnhancer:
                         pass
 
     # ------------------------------------------------------------------
+    # Adaptive profiling — decide clean vs noisy-room before denoise
+    # ------------------------------------------------------------------
+
+    def _estimate_noise_floor_db(self, data: np.ndarray) -> float:
+        """Rough noise-floor estimate in dBFS from the 10th percentile RMS
+        of 50 ms frames. Used to pick a denoise strength."""
+        if data.size == 0:
+            return -60.0
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        # 50 ms frames @ 16 kHz ≈ 800 samples
+        frame = 800
+        n = (data.size // frame) * frame
+        if n == 0:
+            return -60.0
+        frames = data[:n].reshape(-1, frame)
+        rms = np.sqrt(np.mean(frames * frames, axis=1) + 1e-12)
+        # Use the 10th percentile as the floor estimate
+        floor = float(np.percentile(rms, 10))
+        return 20.0 * float(np.log10(max(floor, 1e-7)))
+
+    def _pick_denoise_strength(self, noise_floor_db: float) -> float:
+        """Adaptive prop_decrease.
+
+        Clean speech (floor <= -50 dB) -> 0.45 (barely touch it)
+        Normal room (-50..-40 dB)      -> 0.55 (recommended default)
+        Noisy room  (floor >  -40 dB)  -> 0.65 (still below old 0.75)
+        """
+        if noise_floor_db <= -50.0:
+            return 0.45
+        if noise_floor_db <= -40.0:
+            return 0.55
+        return 0.65
+
+    # ------------------------------------------------------------------
     # Stage 2 — Spectral Gating via noisereduce
     # ------------------------------------------------------------------
 
     def _enhance_spectral(self, wav_bytes: bytes) -> Tuple[bytes, Optional[str]]:
-        """Two-pass noisereduce: stationary noise then non-stationary noise."""
+        """Adaptive spectral gating.
+
+        Replaces the old fixed two-pass noisereduce (stationary @ 0.75 +
+        non-stationary @ 0.5) with an adaptive strategy that keeps weak
+        consonants intact:
+
+        * Estimate the noise floor and pick ``prop_decrease`` in
+          ``[0.45, 0.55, 0.65]`` (clean / normal / noisy).
+        * Run a single non-stationary pass — modern ``noisereduce``
+          handles both noise types in one pass and a second stationary
+          pass at 0.75 was over-attenuating phonemes during low-SNR
+          moments.
+        """
         temp_in = None
         temp_out = None
         try:
@@ -220,22 +334,18 @@ class AudioEnhancer:
 
             data, rate = sf.read(temp_in, dtype="float32")
 
-            # Pass 1 — stationary noise (constant hum / hiss)
+            noise_floor_db = self._estimate_noise_floor_db(data)
+            prop = self._pick_denoise_strength(noise_floor_db)
+            print(
+                f"[AUDIO]   Adaptive denoise: noise_floor={noise_floor_db:.1f} dBFS "
+                f"-> prop_decrease={prop:.2f}"
+            )
+
             cleaned = nr.reduce_noise(
                 y=data,
                 sr=rate,
-                stationary=True,
-                prop_decrease=0.75,
-                n_fft=2048,
-                n_jobs=1,
-            )
-
-            # Pass 2 — non-stationary noise (intermittent background)
-            cleaned = nr.reduce_noise(
-                y=cleaned,
-                sr=rate,
                 stationary=False,
-                prop_decrease=0.5,
+                prop_decrease=prop,
                 n_fft=2048,
                 n_jobs=1,
             )
@@ -253,8 +363,61 @@ class AudioEnhancer:
 
             return enhanced, None
 
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             return wav_bytes, f"noisereduce error: {e}"
+        finally:
+            for p in (temp_in, temp_out):
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+
+    # ------------------------------------------------------------------
+    # Final LUFS pass — fixes intra-file quiet/loud phases
+    # ------------------------------------------------------------------
+
+    def _apply_loudnorm(self, wav_bytes: bytes) -> Tuple[bytes, Optional[str]]:
+        """Run an EBU R128 loudness-target pass. This is the single most
+        important change for speech workflows: it replaces peak-based
+        normalisation (which is blind to intra-file quiet phases)."""
+        temp_in = None
+        temp_out = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                temp_in = f.name
+                f.write(wav_bytes)
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                temp_out = f.name
+
+            cmd = [
+                "ffmpeg",
+                "-i", temp_in,
+                "-af", self._loudnorm_chain(),
+                "-acodec", "pcm_s16le",
+                "-ar", "16000",
+                "-ac", "1",
+                "-y",
+                temp_out,
+            ]
+            result = subprocess.run(  # nosec B603 - fixed argv, no shell
+                cmd, capture_output=True, text=True, timeout=1800, check=False
+            )
+            if result.returncode != 0:
+                return wav_bytes, f"loudnorm failed: {result.stderr[:300]}"
+            if not os.path.exists(temp_out):
+                return wav_bytes, "loudnorm produced no output file"
+
+            with open(temp_out, "rb") as f:
+                enhanced = f.read()
+            if len(enhanced) == 0:
+                return wav_bytes, "loudnorm produced empty output"
+            return enhanced, None
+        except subprocess.TimeoutExpired:
+            return wav_bytes, "loudnorm timed out"
+        except (OSError, ValueError) as e:
+            return wav_bytes, f"loudnorm error: {e}"
         finally:
             for p in (temp_in, temp_out):
                 if p and os.path.exists(p):
@@ -277,7 +440,9 @@ class AudioEnhancer:
                 "-acodec", "pcm_s16le", "-y",
                 temp_resampled,
             ]
-            subprocess.run(resample_cmd, capture_output=True, text=True, timeout=600)
+            subprocess.run(  # nosec B603 - fixed argv, no shell
+                resample_cmd, capture_output=True, text=True, timeout=600, check=False
+            )
             if os.path.exists(temp_resampled) and os.path.getsize(temp_resampled) > 0:
                 os.replace(temp_resampled, wav_path)
         finally:
@@ -322,7 +487,7 @@ class AudioEnhancer:
 
             return enhanced, None
 
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             return wav_bytes, f"Resemble Enhance error: {e}"
         finally:
             for p in (temp_in, temp_out):
