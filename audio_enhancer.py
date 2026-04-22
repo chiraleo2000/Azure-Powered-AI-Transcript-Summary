@@ -27,12 +27,14 @@ _has_soundfile = False
 _has_noisereduce = False
 _has_resemble = False
 
-# Defaults for optional imports (overwritten when available)
+# Defaults for optional imports (overwritten when available).
+# pylint: disable=invalid-name  # these mirror third-party module names
 sf: Any = None
 nr: Any = None
 torch: Any = None
 denoise: Any = None
 resemble_enhance_fn: Any = None
+# pylint: enable=invalid-name
 
 try:
     import soundfile as sf  # type: ignore[no-redef]
@@ -47,7 +49,11 @@ except ImportError:
     pass
 
 try:
-    from resemble_enhance.enhancer.inference import denoise, enhance as resemble_enhance_fn  # type: ignore[no-redef, import-not-found]
+    # pylint: disable=import-error,no-name-in-module
+    from resemble_enhance.enhancer.inference import (  # type: ignore[no-redef, import-not-found]
+        denoise,
+        enhance as resemble_enhance_fn,
+    )
     import torch  # type: ignore[no-redef]
     _has_resemble = True
 except ImportError:
@@ -78,7 +84,12 @@ class AudioEnhancer:
             methods.append("resemble")
         return methods
 
-    def enhance(self, wav_bytes: bytes, method: str, original_filename: str = "") -> Tuple[bytes, Optional[str]]:
+    def enhance(
+        self,
+        wav_bytes: bytes,
+        method: str,
+        original_filename: str = "",
+    ) -> Tuple[bytes, Optional[str]]:
         """
         Enhance WAV audio bytes according to *method*.
 
@@ -118,7 +129,9 @@ class AudioEnhancer:
     # Advanced pipeline — chains DSP → noisereduce → Resemble Enhance
     # ------------------------------------------------------------------
 
-    def _enhance_advanced_pipeline(self, wav_bytes: bytes, fname: str) -> Tuple[bytes, Optional[str]]:
+    def _enhance_advanced_pipeline(
+        self, wav_bytes: bytes, fname: str
+    ) -> Tuple[bytes, Optional[str]]:
         """Run all three enhancement stages sequentially."""
         current = wav_bytes
 
@@ -136,10 +149,16 @@ class AudioEnhancer:
             print(f"[AUDIO] [{fname}]   Stage 2/3: noisereduce spectral gating")
             result, err = self._enhance_spectral(current)
             if err:
-                print(f"[AUDIO] [{fname}]   Spectral gating failed: {err} — continuing with previous")
+                print(
+                    f"[AUDIO] [{fname}]   Spectral gating failed: {err} "
+                    f"— continuing with previous"
+                )
             else:
                 current = result
-                print(f"[AUDIO] [{fname}]   Spectral gating complete: {len(current) / 1024 / 1024:.2f} MB")
+                size_mb = len(current) / 1024 / 1024
+                print(
+                    f"[AUDIO] [{fname}]   Spectral gating complete: {size_mb:.2f} MB"
+                )
         else:
             print(f"[AUDIO] [{fname}]   Stage 2/3: SKIPPED (noisereduce not installed)")
 
@@ -148,10 +167,16 @@ class AudioEnhancer:
             print(f"[AUDIO] [{fname}]   Stage 3/3: Resemble Enhance (CPU)")
             result, err = self._enhance_resemble(current)
             if err:
-                print(f"[AUDIO] [{fname}]   Resemble Enhance failed: {err} — continuing with previous")
+                print(
+                    f"[AUDIO] [{fname}]   Resemble Enhance failed: {err} "
+                    f"— continuing with previous"
+                )
             else:
                 current = result
-                print(f"[AUDIO] [{fname}]   Resemble Enhance complete: {len(current) / 1024 / 1024:.2f} MB")
+                size_mb = len(current) / 1024 / 1024
+                print(
+                    f"[AUDIO] [{fname}]   Resemble Enhance complete: {size_mb:.2f} MB"
+                )
         else:
             print(f"[AUDIO] [{fname}]   Stage 3/3: SKIPPED (resemble-enhance not installed)")
 
@@ -161,10 +186,16 @@ class AudioEnhancer:
         print(f"[AUDIO] [{fname}]   Stage 4/4: EBU R128 loudness normalise (-18 LUFS)")
         result, err = self._apply_loudnorm(current)
         if err:
-            print(f"[AUDIO] [{fname}]   Loudness normalise failed: {err} — continuing with previous")
+            print(
+                f"[AUDIO] [{fname}]   Loudness normalise failed: {err} "
+                f"— continuing with previous"
+            )
         else:
             current = result
-            print(f"[AUDIO] [{fname}]   Loudness normalise complete: {len(current) / 1024 / 1024:.2f} MB")
+            size_mb = len(current) / 1024 / 1024
+            print(
+                f"[AUDIO] [{fname}]   Loudness normalise complete: {size_mb:.2f} MB"
+            )
 
         print(f"[AUDIO] [{fname}] Advanced pipeline finished: {len(current) / 1024 / 1024:.2f} MB")
         return current, None

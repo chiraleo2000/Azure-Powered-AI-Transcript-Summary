@@ -8,7 +8,7 @@ import base64
 import time
 
 # App version - change this on every deployment to bust browser caches
-APP_VERSION = "0.1.31"
+APP_VERSION = "0.1.32"
 
 # Summary format constants (avoid duplicate literals - S1192)
 SUMMARY_FMT_MEETING = "รายงานการประชุมภายใน"
@@ -792,7 +792,7 @@ if __name__ == "__main__":
     print("🔐 Session management enabled")
     print("☁️ Cloud storage enabled")
     demo.launch(
-        server_name="0.0.0.0",
+        server_name="0.0.0.0",  # nosec B104 - required for Azure App Service container
         server_port=port,
         share=False,
         show_error=True

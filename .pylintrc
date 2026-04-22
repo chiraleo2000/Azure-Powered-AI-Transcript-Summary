@@ -1,0 +1,32 @@
+[MASTER]
+# Gradio exposes event handlers (.click, .change, .load, .tick, .select,
+# ...) as dynamic attributes that pylint's static analyser cannot see.
+# Mark them as generated so E1101 no-member stops firing for the UI layer.
+generated-members=gradio.*,gr.*
+
+[FORMAT]
+max-line-length=150
+
+[MESSAGES CONTROL]
+# These are stylistic / not relevant for this codebase:
+#   C0103 invalid-name    (Thai UI label dicts use upper-case snake_case)
+#   C0114 missing-module-docstring
+#   C0115 missing-class-docstring
+#   C0116 missing-function-docstring
+#   C0301 line-too-long   (Thai label strings exceed western wrap width)
+#   C0303 trailing-whitespace
+#   C0411 wrong-import-order
+#   C0413 wrong-import-position   (needed by sys.path bootstrap in app.py)
+#   C0415 import-outside-toplevel (used intentionally for lazy imports)
+#   R0801 duplicate-code
+#   R0902 too-many-instance-attributes
+#   R0903 too-few-public-methods
+#   R0911 too-many-return-statements
+#   R0912 too-many-branches
+#   R0913 too-many-arguments
+#   R0914 too-many-locals
+#   R0915 too-many-statements
+#   W0611 unused-import   (some imports kept for re-export compatibility)
+#   W0621 redefined-outer-name (Gradio demo context)
+#   W0703/W0718 broad-except (intentional at pipeline boundaries)
+disable=C0103,C0114,C0115,C0116,C0301,C0303,C0411,C0413,C0415,R0801,R0902,R0903,R0911,R0912,R0913,R0914,R0915,W0611,W0621,W0703,W0718
