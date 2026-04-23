@@ -252,85 +252,157 @@ def _read_upload_file(file):
 
 
 # Transcription Functions
-def submit_transcription(file, language, audio_format, diarization_enabled, speakers, 
-                        profanity, punctuation, timestamps, lexical, audio_processing, 
+def _preprocessing_tuple(status_text, info_text, job_state, stats_display, refresh_label):
+    """Build the 8-output tuple for an in-progress preprocessing yield."""
+    return (
+        status_text,
+        "",
+        gr.update(value=""), gr.update(visible=False),
+        info_text,
+        job_state,
+        gr.update(value=_refresh_html(refresh_label)),
+        stats_display,
+    )
+
+
+def submit_transcription(file, language, audio_format, diarization_enabled, speakers,
+                        profanity, punctuation, timestamps, lexical, audio_processing,
                         user, session_token=None):
-    """Submit transcription job to Azure Speech Service"""
+    """Submit a transcription job. Generator: streams preprocessing progress
+    so the UI shows live status (validating → converting → enhancing → uploading)
+    instead of looking idle while the heavy work runs."""
     user = _ensure_user(user, session_token)
     if not user:
-        return _error_result("❌ Please log in to submit transcriptions")
-    
-    if file is None:
-        return _error_result("Please upload an audio or video file first.")
-    
-    try:
-        # Get file data
-        try:
-            file_bytes, original_filename = _read_upload_file(file)
-        except ValueError as e:
-            return _error_result(str(e))
-        except Exception as e:
-            return _error_result(f"Error reading file: {str(e)}")
-        
-        # Validate file
-        file_extension = original_filename.split('.')[-1].lower() if '.' in original_filename else ""
-        supported_extensions = set(AUDIO_FORMATS) | {
-            'mp4', 'mov', 'avi', 'mkv', 'webm', 'm4a', '3gp', 'f4v', 
-            'wmv', 'asf', 'rm', 'rmvb', 'flv', 'mpg', 'mpeg', 'mts', 'vob'
-        }
-        
-        if file_extension not in supported_extensions and file_extension != "":
-            return _error_result(f"Unsupported file format: .{file_extension}")
-        
-        # Basic file size check
-        if len(file_bytes) > 500 * 1024 * 1024:  # 500MB limit
-            return _error_result("File too large. Please upload files smaller than 500MB.")
-        
-        # Prepare settings
-        settings = {
-            'audio_format': audio_format,
-            'diarization_enabled': bool(diarization_enabled),
-            'speakers': int(speakers),
-            'profanity': profanity,
-            'punctuation': punctuation,
-            'timestamps': bool(timestamps),
-            'lexical': bool(lexical),
-            'audio_processing': audio_processing
-        }
+        yield _error_result("❌ Please log in to submit transcriptions")
+        return
 
-        
-        print(f"🎙️ Submitting transcription with settings: {settings}")
-        print(f"   - Diarization: {diarization_enabled}")
-        
-        # Submit job
+    if file is None:
+        yield _error_result("Please upload an audio or video file first.")
+        return
+
+    # Read file
+    try:
+        file_bytes, original_filename = _read_upload_file(file)
+    except ValueError as e:
+        yield _error_result(str(e))
+        return
+    except Exception as e:  # pylint: disable=broad-except
+        yield _error_result(f"Error reading file: {str(e)}")
+        return
+
+    # Validate extension
+    file_extension = original_filename.split('.')[-1].lower() if '.' in original_filename else ""
+    supported_extensions = set(AUDIO_FORMATS) | {
+        'mp4', 'mov', 'avi', 'mkv', 'webm', 'm4a', '3gp', 'f4v',
+        'wmv', 'asf', 'rm', 'rmvb', 'flv', 'mpg', 'mpeg', 'mts', 'vob'
+    }
+    if file_extension not in supported_extensions and file_extension != "":
+        yield _error_result(f"Unsupported file format: .{file_extension}")
+        return
+
+    if len(file_bytes) > 500 * 1024 * 1024:
+        yield _error_result("File too large. Please upload files smaller than 500MB.")
+        return
+
+    file_mb = len(file_bytes) / (1024 * 1024)
+    stats_display = get_user_stats_display(user)
+
+    # Lock job_state into a "preprocessing" mode so the timer / refresh
+    # button does not say "No active job" while we are doing heavy work.
+    preprocessing_state = {
+        'current_job_id': None,
+        'preprocessing': True,
+        'preprocessing_stage': 'starting',
+        'preprocessing_filename': original_filename,
+        'start_time': datetime.now().isoformat(),
+        'auto_refresh_active': True,
+        'last_status': 'preprocessing',
+    }
+
+    # 1) Immediate "received" yield so the UI updates the moment the user clicks.
+    yield _preprocessing_tuple(
+        f"⏳ Preprocessing started\n"
+        f"📁 File: {original_filename} ({file_mb:.1f} MB)\n"
+        f"🔍 Validating audio...",
+        f"Preparing: {original_filename}",
+        preprocessing_state,
+        stats_display,
+        "🔄 Preprocessing audio...",
+    )
+
+    # 2) Conversion stage notice (only meaningful for non-WAV input).
+    is_wav = file_extension == 'wav'
+    if not is_wav:
+        preprocessing_state['preprocessing_stage'] = 'converting'
+        yield _preprocessing_tuple(
+            f"⏳ Preprocessing — Step 1 of 3\n"
+            f"📁 File: {original_filename} ({file_mb:.1f} MB)\n"
+            f"🔄 Converting {file_extension.upper()} → WAV (16 kHz mono)...\n"
+            f"⏱️ Large files may take 1-3 minutes.",
+            f"Converting: {original_filename}",
+            preprocessing_state,
+            stats_display,
+            "🔄 Converting to WAV...",
+        )
+
+    # 3) Enhancement stage notice (skip for 'minimal').
+    if audio_processing and audio_processing != 'minimal':
+        preprocessing_state['preprocessing_stage'] = 'enhancing'
+        yield _preprocessing_tuple(
+            f"⏳ Preprocessing — Step 2 of 3\n"
+            f"📁 File: {original_filename} ({file_mb:.1f} MB)\n"
+            f"🔊 Applying audio enhancement: {audio_processing}\n"
+            f"⏱️ This is the slowest step for large files.",
+            f"Enhancing ({audio_processing}): {original_filename}",
+            preprocessing_state,
+            stats_display,
+            f"🔊 Enhancing ({audio_processing})...",
+        )
+
+    # 4) Run the actual heavy pipeline + upload.
+    settings = {
+        'audio_format': audio_format,
+        'diarization_enabled': bool(diarization_enabled),
+        'speakers': int(speakers),
+        'profanity': profanity,
+        'punctuation': punctuation,
+        'timestamps': bool(timestamps),
+        'lexical': bool(lexical),
+        'audio_processing': audio_processing,
+    }
+    print(f"🎙️ Submitting transcription with settings: {settings}")
+    print(f"   - Diarization: {diarization_enabled}")
+
+    try:
         job_id = transcription_manager.submit_transcription(
             file_bytes, original_filename, user.user_id, language, settings
         )
-        
-        # Update job state
-        job_state = {
-            'current_job_id': job_id,
-            'start_time': datetime.now().isoformat(),
-            'auto_refresh_active': True,
-            'last_status': 'pending'
-        }
-        
-        # Get updated user stats
-        stats_display = get_user_stats_display(user)
-        
-        return (
-            f"🚀 Transcription started for: {original_filename}\n📡 Auto-refreshing every 10 seconds...",
-            "",
-            gr.update(value=""), gr.update(visible=False),
-            f"Job ID: {job_id}",
-            job_state,
-            gr.update(value=_refresh_html(MSG_AUTO_REFRESH)),
-            stats_display
-        )
-        
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-except
         print(f"❌ Error submitting transcription: {str(e)}")
-        return _error_result(f"Error: {str(e)}")
+        yield _error_result(f"Error: {str(e)}")
+        return
+
+    # 5) Final yield: real job is now live; auto-refresh takes over.
+    job_state = {
+        'current_job_id': job_id,
+        'preprocessing': False,
+        'start_time': datetime.now().isoformat(),
+        'auto_refresh_active': True,
+        'last_status': 'pending',
+    }
+    stats_display = get_user_stats_display(user)
+    yield (
+        f"🚀 Transcription submitted to Azure Speech Service\n"
+        f"📁 File: {original_filename}\n"
+        f"🆔 Job: {job_id[:8]}...\n"
+        f"📡 Auto-refreshing status every 10 seconds...",
+        "",
+        gr.update(value=""), gr.update(visible=False),
+        f"Job ID: {job_id}",
+        job_state,
+        gr.update(value=_refresh_html(MSG_AUTO_REFRESH)),
+        stats_display,
+    )
 
 def _build_completed_result(job, job_id, processing_time, user, stats_display):
     """Build result tuple for a completed transcription job."""
@@ -411,10 +483,27 @@ def check_current_job_status(job_state, user, session_token=None):
     user = _ensure_user(user, session_token)
     if not user:
         return _status_result("❌ Please log in to check status")
-    
-    if not job_state or 'current_job_id' not in job_state:
+
+    # While the submit handler is still streaming preprocessing yields,
+    # job_state has preprocessing=True and current_job_id is not yet
+    # assigned. Don't say "No active job" — show preprocessing instead.
+    if job_state and job_state.get('preprocessing'):
+        stage = job_state.get('preprocessing_stage', 'starting')
+        fname = job_state.get('preprocessing_filename', 'audio file')
+        stage_label = {
+            'starting': '🔍 Validating audio file...',
+            'converting': '🔄 Converting to WAV (16 kHz mono)...',
+            'enhancing': '🔊 Enhancing audio quality...',
+        }.get(stage, '⏳ Preprocessing audio...')
+        return _status_result(
+            f"⏳ Preprocessing in progress\n📁 {fname}\n{stage_label}",
+            info=f"Preprocessing: {fname}",
+            refresh_html="🔄 Preprocessing audio...",
+        )
+
+    if not job_state or 'current_job_id' not in job_state or not job_state.get('current_job_id'):
         return _status_result("No active job")
-    
+
     job_id = job_state['current_job_id']
     
     try:
@@ -489,8 +578,10 @@ def _guess_mime(ext: str) -> str:
         "wmv": "video/x-ms-wmv",
         "3gp": "video/3gpp",
     }
-    if ext in audio_map: return audio_map[ext]
-    if ext in video_map: return video_map[ext]
+    if ext in audio_map:
+        return audio_map[ext]
+    if ext in video_map:
+        return video_map[ext]
     # Fallback via mimetypes
     return mimetypes.types_map.get("." + ext, "application/octet-stream")
 
@@ -823,15 +914,14 @@ def auto_refresh_ai_summary(summary_job_state, user, session_token=None):
     
     if summary_job_state and (summary_job_state.get('current_summary_job_id') or summary_job_state.get('waiting_for_transcription')):
         return check_ai_summary_status(summary_job_state, user, session_token)
-    else:
-        return (
-            gr.update(),
-            gr.update(),
-            gr.update(), gr.update(), gr.update(),
-            gr.update(),
-            gr.update(value=""),
-            gr.update()
-        )
+    return (
+        gr.update(),
+        gr.update(),
+        gr.update(), gr.update(),
+        gr.update(),
+        gr.update(value=""),
+        gr.update()
+    )
 
 # History Functions
 def get_transcription_history_table(user, show_all=False):

@@ -8,7 +8,7 @@ import base64
 import time
 
 # App version - change this on every deployment to bust browser caches
-APP_VERSION = "0.1.33"
+APP_VERSION = "0.1.34"
 
 # Summary format constants (avoid duplicate literals - S1192)
 SUMMARY_FMT_MEETING = "รายงานการประชุมภายใน"
