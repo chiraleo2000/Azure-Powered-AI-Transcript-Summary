@@ -1,3 +1,4 @@
+import gc
 import os
 import time
 import uuid
@@ -56,10 +57,17 @@ if LOCAL_TESTING_MODE:
     print("[OK] No Azure API calls will be made")
     print("[OK] Data will be stored locally in ./local_storage")
     print("=" * 80)
-    from local_mock import (
-        get_mock_storage, get_mock_transcription, 
+    # local_mock is only present in dev environments; suppress the
+    # static analyser warning when it is intentionally absent.
+    from local_mock import (  # type: ignore[import-not-found]  # pylint: disable=import-error
+        get_mock_storage, get_mock_transcription,
         get_mock_ai, get_mock_ocr, is_local_testing_mode
     )
+else:
+    # Stub names so static analysers don't flag possibly-unbound use.
+    # Guarded by LOCAL_TESTING_MODE at every call site.
+    get_mock_storage = get_mock_transcription = None  # type: ignore[assignment]
+    get_mock_ai = get_mock_ocr = is_local_testing_mode = None  # type: ignore[assignment]
 
 def _require_setting(setting_name: str, value: Optional[str]) -> str:
     if not value or value.strip() == "" or "your" in value.lower():
@@ -1025,11 +1033,12 @@ class AudioConverter:
             print(f"🔄 Converting {original_filename} to WAV format...")
             
             # Run FFmpeg
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603 - fixed argv, no shell
                 ffmpeg_cmd,
                 capture_output=True,
                 text=True,
-                timeout=1800  # 30 minute timeout
+                timeout=1800,  # 30 minute timeout
+                check=False,
             )
             
             if result.returncode != 0:
@@ -1082,15 +1091,15 @@ class AudioConverter:
                 temp_file
             ]
             
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603 - fixed argv, no shell
                 ffprobe_cmd,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                check=False,
             )
-            
+
             if result.returncode == 0:
-                import json
                 info = json.loads(result.stdout)
                 return info
             
@@ -1112,7 +1121,11 @@ class TranscriptionManager:
     def __init__(self):
         self.blob_storage = BlobStorageManager()
         self.audio_converter = AudioConverter()
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        # Concurrency capped to keep RAM under control on a 6 GiB worker.
+        # Each in-flight job can briefly hold ~1 GiB during enhancement of
+        # a 200-500 MB source; 2 workers keeps us well clear of OOM.
+        max_workers = max(1, int(os.environ.get("MAX_CONCURRENT_JOBS", "2")))
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._job_status_cache = {}
         
         # Audio enhancement (DSP / noisereduce / Resemble Enhance)
@@ -1196,77 +1209,98 @@ class TranscriptionManager:
                 print(f"❌ Background worker error: {e}")
                 time.sleep(30)
     
-    def submit_transcription(self, file_bytes: bytes, original_filename: str, 
+    def _maybe_convert_to_wav(self, file_bytes, original_filename, settings):
+        """Convert to WAV when the source isn't already WAV. Returns
+        (processed_bytes, audio_format)."""
+        file_ext = os.path.splitext(original_filename)[1].lower().lstrip('.')
+        if file_ext == 'wav':
+            settings['converted_to_wav'] = False
+            print(f"[OK] Using original WAV file: {len(file_bytes) / 1024 / 1024:.2f} MB")
+            return file_bytes, 'wav'
+
+        print(f"\U0001f504 Converting {file_ext.upper()} to WAV format...")
+        wav_bytes, error = self.audio_converter.convert_to_wav(
+            file_bytes, original_filename
+        )
+        if error:
+            raise AudioConversionError(f"Audio conversion failed: {error}")
+        if not wav_bytes:
+            raise AudioConversionError("Audio conversion produced empty file")
+        print(f"[OK] Conversion complete: {len(wav_bytes) / 1024 / 1024:.2f} MB")
+        settings['original_format'] = file_ext
+        settings['converted_to_wav'] = True
+        return wav_bytes, 'wav'
+
+    def _maybe_enhance_audio(self, processed_bytes, original_filename, settings):
+        """Apply tiered audio enhancement using the path-based API so that
+        large WAVs (200-500 MB) never sit in the Python heap as multiple
+        bytes copies. Returns the (possibly enhanced) bytes."""
+        audio_processing = settings.get('audio_processing', 'standard')
+        if audio_processing == 'minimal':
+            settings['audio_enhanced'] = False
+            settings['enhancement_method'] = 'none'
+            return processed_bytes
+
+        print(f"\U0001f50a Applying audio enhancement: {audio_processing}")
+        enh_in = enh_out = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                enh_in = f.name
+                f.write(processed_bytes)
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                enh_out = f.name
+            # Drop the in-memory copy now that it lives on disk.
+            del processed_bytes
+            gc.collect()
+
+            enhance_err = self.audio_enhancer.enhance_path(
+                enh_in, enh_out, audio_processing, original_filename
+            )
+            if enhance_err or not os.path.exists(enh_out) or os.path.getsize(enh_out) == 0:
+                print(f"[WARN] Audio enhancement warning: {enhance_err or 'no output'}")
+                source = enh_in
+            else:
+                source = enh_out
+            with open(source, 'rb') as f:
+                result_bytes = f.read()
+            if source is enh_out:
+                print(f"[OK] Audio enhanced: {len(result_bytes) / 1024 / 1024:.2f} MB")
+        finally:
+            for _p in (enh_in, enh_out):
+                if _p and os.path.exists(_p):
+                    try:
+                        os.remove(_p)
+                    except OSError:
+                        pass
+            gc.collect()
+
+        settings['audio_enhanced'] = True
+        settings['enhancement_method'] = audio_processing
+        return result_bytes
+
+    def submit_transcription(self, file_bytes: bytes, original_filename: str,
                            user_id: str, language: str, settings: Dict) -> str:
         """Submit new transcription job to Azure Speech Service"""
         job_id = str(uuid.uuid4())
-        
+
         if not isinstance(settings, dict):
             settings = {}
-        
-        # Azure STT path
+
         print(f"[MIC] Creating transcription job: {original_filename}")
-        
+
         try:
-            # Check file extension
-            file_ext = os.path.splitext(original_filename)[1].lower().lstrip('.')
-            
-            # Determine if conversion is needed
-            needs_conversion = file_ext != 'wav'
-            
-            if needs_conversion:
-                print(f"🔄 Converting {file_ext.upper()} to WAV format...")
-                
-                # Convert to WAV
-                wav_bytes, error = self.audio_converter.convert_to_wav(
-                    file_bytes, 
-                    original_filename
-                )
-                
-                if error:
-                    raise AudioConversionError(f"Audio conversion failed: {error}")
-                
-                if not wav_bytes:
-                    raise AudioConversionError("Audio conversion produced empty file")
-                
-                # Use converted WAV
-                processed_bytes = wav_bytes
-                audio_format = 'wav'
-                print(f"[OK] Conversion complete: {len(wav_bytes) / 1024 / 1024:.2f} MB")
-                
-                # Store conversion info in settings
-                settings['original_format'] = file_ext
-                settings['converted_to_wav'] = True
-            else:
-                # Already WAV, use as-is
-                processed_bytes = file_bytes
-                audio_format = 'wav'
-                settings['converted_to_wav'] = False
-                print(f"[OK] Using original WAV file: {len(file_bytes) / 1024 / 1024:.2f} MB")
-            
-            # Audio enhancement based on quality setting
-            audio_processing = settings.get('audio_processing', 'standard')
-            if audio_processing != 'minimal':
-                print(f"🔊 Applying audio enhancement: {audio_processing}")
-                enhanced_bytes, enhance_err = self.audio_enhancer.enhance(
-                    processed_bytes, audio_processing, original_filename
-                )
-                if enhance_err:
-                    print(f"[WARN] Audio enhancement warning: {enhance_err}")
-                else:
-                    processed_bytes = enhanced_bytes
-                    print(f"[OK] Audio enhanced: {len(processed_bytes) / 1024 / 1024:.2f} MB")
-                settings['audio_enhanced'] = True
-                settings['enhancement_method'] = audio_processing
-            else:
-                settings['audio_enhanced'] = False
-                settings['enhancement_method'] = 'none'
-            
+            processed_bytes, audio_format = self._maybe_convert_to_wav(
+                file_bytes, original_filename, settings
+            )
+            processed_bytes = self._maybe_enhance_audio(
+                processed_bytes, original_filename, settings
+            )
+
             # Upload to blob storage
             audio_url = self.blob_storage.upload_audio(
-                processed_bytes, 
-                user_id, 
-                job_id, 
+                processed_bytes,
+                user_id,
+                job_id,
                 audio_format
             )
             
@@ -1502,8 +1536,8 @@ class TranscriptionManager:
             
             url = f"{AZURE_SPEECH_KEY_ENDPOINT}/speechtotext/{API_VERSION}/transcriptions/{job.azure_trans_id}"
             headers = {"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY}
-            
-            r = requests.get(url, headers=headers)
+
+            r = requests.get(url, headers=headers, timeout=30)
             data = r.json()
             
             if data.get("status") == "Succeeded":
@@ -1789,7 +1823,10 @@ class TranscriptionManager:
             
             for blob in blobs:
                 try:
-                    blob_client = self.blob_storage._get_blob_client(META_DATA_CONTAINER, blob.name)
+                    # pylint: disable=protected-access
+                    blob_client = self.blob_storage._get_blob_client(
+                        META_DATA_CONTAINER, blob.name
+                    )
                     blob_client.delete_blob()
                 except Exception:
                     continue
@@ -1826,10 +1863,11 @@ class TranscriptionManager:
 def check_ffmpeg_available() -> bool:
     """Check if FFmpeg is available on the system"""
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 - fixed argv, no shell
             ['ffmpeg', '-version'],
             capture_output=True,
-            timeout=5
+            timeout=5,
+            check=False,
         )
         return result.returncode == 0
     except Exception:
@@ -1876,8 +1914,6 @@ def _test_speech_key(key, endpoint_raw, label):
 
 def validate_speech_service():
     """Test Azure Speech Service key validity on startup"""
-    import requests
-    
     print("\n" + "="*70)
     print("🔍 TESTING AZURE SPEECH SERVICE CONNECTIVITY")
     print("="*70)

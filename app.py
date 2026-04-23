@@ -8,7 +8,7 @@ import base64
 import time
 
 # App version - change this on every deployment to bust browser caches
-APP_VERSION = "0.1.32"
+APP_VERSION = "0.1.33"
 
 # Summary format constants (avoid duplicate literals - S1192)
 SUMMARY_FMT_MEETING = "รายงานการประชุมภายใน"
@@ -522,7 +522,7 @@ def create_simplified_interface():
             file_type = get_file_type(fp)
             if file_type == 'audio':
                 return gr.update(visible=True, value=fp), gr.update(visible=False)
-            elif file_type == 'video':
+            if file_type == 'video':
                 return gr.update(visible=False), gr.update(visible=True, value=fp)
             return gr.update(visible=False), gr.update(visible=False)
         

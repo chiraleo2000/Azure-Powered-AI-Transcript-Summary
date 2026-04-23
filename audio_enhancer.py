@@ -2,18 +2,23 @@
 Audio Enhancement Module for Azure AI Transcript Summary
 
 Tiered pipelines optimised for speech-to-text with an emphasis on
-keeping quiet phrases audible:
+keeping quiet phrases audible AND staying within a constrained memory
+budget (3 vCPU / 6 GiB container) for long files (200-500 MB / 1-4 h).
 
   - minimal  : pass-through
   - standard : FFmpeg DSP — highpass/lowpass, light spectral denoise,
                makeup-gain compressor, EBU R128 loudness normalisation
-               to -18 LUFS (fixes "some parts quiet, some parts fine").
-  - advanced : adaptive profile selection (clean vs noisy room) +
-               gentler noisereduce (prop_decrease ~0.55) +
-               final LUFS target pass. Equivalent to the "เน้นคุณภาพ"
-               profile — noticeably better than the standard chain.
+               to -18 LUFS.
+  - advanced : adaptive profile + chunked noisereduce (5-min segments,
+               concat back) + optional Resemble Enhance (skipped on
+               very long / very large inputs) + final LUFS pass.
+
+All internal stages operate on file paths so the full waveform never
+sits in the Python heap as ``bytes``.  The legacy ``enhance(wav_bytes)``
+entry point is preserved as a thin wrapper that writes/reads temp files.
 """
 
+import gc
 import os
 import subprocess  # nosec B404 - ffmpeg invoked with fixed argv, no shell
 import tempfile
@@ -60,8 +65,45 @@ except ImportError:
     pass
 
 
+# --- Module-level tunables --------------------------------------------------------
+
+# Chunk size for memory-bounded spectral denoise (seconds).
+_CHUNK_SECONDS = 300                 # 5 min per chunk
+# Files longer than this trigger chunked spectral denoise.
+_CHUNK_THRESHOLD_SECONDS = 300
+# Use a smaller FFT for very long inputs to cap RAM during noisereduce.
+_LONG_AUDIO_THRESHOLD_SECONDS = 1800  # 30 min
+# Skip Resemble Enhance entirely when inputs are this large/long
+# (Resemble Enhance loads the full float32 tensor into RAM and is the
+# single biggest OOM trigger).
+_RESEMBLE_MAX_MB = 250
+_RESEMBLE_MAX_SECONDS = 1800          # 30 min
+# Above this duration, auto-degrade ``advanced`` → ``standard`` to keep
+# the worker well clear of the 6 GiB ceiling.
+_ADVANCED_MAX_SECONDS = 7200          # 2 h
+
+# FFmpeg input args used by every shell-out — caps thread fan-out and
+# tolerates corrupt frames in user uploads instead of failing outright.
+_FFMPEG_INPUT_FLAGS = ["-fflags", "+discardcorrupt", "-threads", "2"]
+
+
+def _ffmpeg_run(cmd: List[str], timeout: int = 1800) -> subprocess.CompletedProcess:
+    """Run an ffmpeg/ffprobe command with a fixed argv (no shell)."""
+    return subprocess.run(  # nosec B603 - fixed argv, no shell
+        cmd, capture_output=True, text=True, timeout=timeout, check=False
+    )
+
+
+def _safe_remove(path: Optional[str]) -> None:
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 class AudioEnhancer:
-    """Tiered audio enhancement that operates on 16 kHz mono WAV bytes."""
+    """Tiered audio enhancement that operates on 16 kHz mono WAV files."""
 
     def __init__(self):
         self.has_soundfile = _has_soundfile
@@ -84,224 +126,297 @@ class AudioEnhancer:
             methods.append("resemble")
         return methods
 
+    def enhance_path(
+        self,
+        in_path: str,
+        out_path: str,
+        method: str,
+        original_filename: str = "",
+    ) -> Optional[str]:
+        """Enhance a WAV file on disk and write the result to *out_path*.
+
+        Returns ``None`` on success or an error message string on failure.
+        On any internal-stage failure the input is copied to *out_path*
+        unchanged so the caller can always proceed with transcription.
+        """
+        fname = original_filename or os.path.basename(in_path) or "audio"
+
+        if method == "minimal":
+            print(f"[AUDIO] [{fname}] Skipping enhancement (minimal mode)")
+            return self._copy_file(in_path, out_path)
+
+        if method == "standard":
+            print(f"[AUDIO] [{fname}] Applying DSP filters (standard mode)")
+            err = self._enhance_dsp_path(in_path, out_path)
+            if err:
+                self._copy_file(in_path, out_path)
+            return err
+
+        if method == "advanced":
+            print(f"[AUDIO] [{fname}] Applying full enhancement pipeline (advanced mode)")
+            return self._enhance_advanced_path(in_path, out_path, fname)
+
+        print(f"[AUDIO] [{fname}] Unknown method '{method}', falling back to standard DSP")
+        err = self._enhance_dsp_path(in_path, out_path)
+        if err:
+            self._copy_file(in_path, out_path)
+        return err
+
     def enhance(
         self,
         wav_bytes: bytes,
         method: str,
         original_filename: str = "",
     ) -> Tuple[bytes, Optional[str]]:
+        """Backward-compatible bytes API.
+
+        Internally writes *wav_bytes* to a temp file, runs
+        :py:meth:`enhance_path`, then reads the result back. New callers
+        should prefer :py:meth:`enhance_path` to keep large audio off the
+        Python heap.
         """
-        Enhance WAV audio bytes according to *method*.
+        in_path = None
+        out_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                in_path = f.name
+                f.write(wav_bytes)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                out_path = f.name
 
-        Parameters
-        ----------
-        wav_bytes : bytes
-            16 kHz, mono, 16-bit PCM WAV data.
-        method : str
-            One of ``"minimal"``, ``"standard"``, ``"advanced"``.
-        original_filename : str
-            Used only for logging.
+            err = self.enhance_path(in_path, out_path, method, original_filename)
 
-        Returns
-        -------
-        (enhanced_bytes, error_message)
-            *error_message* is ``None`` on success.
-        """
-        fname = original_filename or "audio"
+            if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+                return wav_bytes, err or "enhancement produced no output"
 
-        if method == "minimal":
-            print(f"[AUDIO] [{fname}] Skipping enhancement (minimal mode)")
-            return wav_bytes, None
-
-        if method == "standard":
-            print(f"[AUDIO] [{fname}] Applying DSP filters (standard mode)")
-            return self._enhance_dsp(wav_bytes)
-
-        if method == "advanced":
-            print(f"[AUDIO] [{fname}] Applying full enhancement pipeline (advanced mode)")
-            return self._enhance_advanced_pipeline(wav_bytes, fname)
-
-        # Unknown method — fall back to standard
-        print(f"[AUDIO] [{fname}] Unknown method '{method}', falling back to standard DSP")
-        return self._enhance_dsp(wav_bytes)
+            with open(out_path, "rb") as f:
+                enhanced = f.read()
+            return enhanced, err
+        finally:
+            _safe_remove(in_path)
+            _safe_remove(out_path)
 
     # ------------------------------------------------------------------
-    # Advanced pipeline — chains DSP → noisereduce → Resemble Enhance
+    # File helpers
     # ------------------------------------------------------------------
 
-    def _enhance_advanced_pipeline(
-        self, wav_bytes: bytes, fname: str
-    ) -> Tuple[bytes, Optional[str]]:
-        """Run all three enhancement stages sequentially."""
-        current = wav_bytes
+    @staticmethod
+    def _copy_file(src: str, dst: str) -> Optional[str]:
+        try:
+            with open(src, "rb") as fin, open(dst, "wb") as fout:
+                while True:
+                    buf = fin.read(1024 * 1024)
+                    if not buf:
+                        break
+                    fout.write(buf)
+            return None
+        except OSError as e:
+            return f"copy failed: {e}"
 
-        # Stage 1 — FFmpeg DSP
-        print(f"[AUDIO] [{fname}]   Stage 1/3: FFmpeg DSP filters")
-        result, err = self._enhance_dsp(current)
-        if err:
-            print(f"[AUDIO] [{fname}]   DSP stage failed: {err} — continuing with original")
-        else:
-            current = result
-            print(f"[AUDIO] [{fname}]   DSP complete: {len(current) / 1024 / 1024:.2f} MB")
+    @staticmethod
+    def _probe_duration(path: str) -> float:
+        """Return media duration in seconds via ``ffprobe``; 0.0 on failure."""
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path,
+        ]
+        try:
+            result = _ffmpeg_run(cmd, timeout=60)
+            if result.returncode != 0:
+                return 0.0
+            return float(result.stdout.strip() or 0.0)
+        except (subprocess.TimeoutExpired, ValueError, OSError):
+            return 0.0
 
-        # Stage 2 — noisereduce spectral gating
-        if self.has_noisereduce:
-            print(f"[AUDIO] [{fname}]   Stage 2/3: noisereduce spectral gating")
-            result, err = self._enhance_spectral(current)
-            if err:
-                print(
-                    f"[AUDIO] [{fname}]   Spectral gating failed: {err} "
-                    f"— continuing with previous"
-                )
-            else:
-                current = result
-                size_mb = len(current) / 1024 / 1024
-                print(
-                    f"[AUDIO] [{fname}]   Spectral gating complete: {size_mb:.2f} MB"
-                )
-        else:
-            print(f"[AUDIO] [{fname}]   Stage 2/3: SKIPPED (noisereduce not installed)")
+    # ------------------------------------------------------------------
+    # Advanced pipeline — chains DSP → (chunked) noisereduce → Resemble
+    # ------------------------------------------------------------------
 
-        # Stage 3 — Resemble Enhance
-        if self.has_resemble:
-            print(f"[AUDIO] [{fname}]   Stage 3/3: Resemble Enhance (CPU)")
-            result, err = self._enhance_resemble(current)
-            if err:
-                print(
-                    f"[AUDIO] [{fname}]   Resemble Enhance failed: {err} "
-                    f"— continuing with previous"
-                )
-            else:
-                current = result
-                size_mb = len(current) / 1024 / 1024
-                print(
-                    f"[AUDIO] [{fname}]   Resemble Enhance complete: {size_mb:.2f} MB"
-                )
-        else:
-            print(f"[AUDIO] [{fname}]   Stage 3/3: SKIPPED (resemble-enhance not installed)")
+    def _enhance_advanced_path(
+        self, in_path: str, out_path: str, fname: str
+    ) -> Optional[str]:
+        """Run the advanced enhancement chain on disk, gating expensive
+        stages by duration / size to stay within the 6 GiB worker."""
+        duration = self._probe_duration(in_path)
+        size_mb = os.path.getsize(in_path) / 1024 / 1024
+        print(
+            f"[AUDIO] [{fname}]   Source: {size_mb:.1f} MB, "
+            f"{duration:.1f} s ({duration / 60:.1f} min)"
+        )
 
-        # Stage 4 — final EBU R128 loudness pass. Guarantees the "เน้นคุณภาพ"
-        # tier ends at -18 LUFS regardless of what earlier stages did to
-        # dynamics, so quiet phrases stay audible.
-        print(f"[AUDIO] [{fname}]   Stage 4/4: EBU R128 loudness normalise (-18 LUFS)")
-        result, err = self._apply_loudnorm(current)
-        if err:
-            print(
-                f"[AUDIO] [{fname}]   Loudness normalise failed: {err} "
-                f"— continuing with previous"
-            )
-        else:
-            current = result
-            size_mb = len(current) / 1024 / 1024
-            print(
-                f"[AUDIO] [{fname}]   Loudness normalise complete: {size_mb:.2f} MB"
+        if duration > _ADVANCED_MAX_SECONDS:
+            return self._auto_degrade_to_standard(in_path, out_path, fname)
+
+        scratch_a = scratch_b = None
+        try:
+            scratch_a = self._scratch_wav()
+            scratch_b = self._scratch_wav()
+            current = in_path
+
+            # Stage 1 — FFmpeg DSP
+            current = self._run_stage(
+                fname, "1/4", "FFmpeg DSP filters", current, scratch_a, scratch_b,
+                self._enhance_dsp_path,
+                "DSP complete",
             )
 
-        print(f"[AUDIO] [{fname}] Advanced pipeline finished: {len(current) / 1024 / 1024:.2f} MB")
-        return current, None
+            # Stage 2 — noisereduce spectral gating (chunked for long files)
+            current = self._run_stage_gated(
+                fname, "2/4", "noisereduce spectral gating",
+                current, scratch_a, scratch_b,
+                enabled=self.has_noisereduce,
+                disabled_reason="noisereduce not installed",
+                runner=lambda src, dst: self._spectral_path(src, dst, duration, fname),
+                done_label="Spectral gating complete",
+            )
+
+            # Stage 3 — Resemble Enhance (gated by install + size + duration)
+            resemble_skip = self._resemble_skip_reason(size_mb, duration)
+            current = self._run_stage_gated(
+                fname, "3/4", "Resemble Enhance (CPU)",
+                current, scratch_a, scratch_b,
+                enabled=resemble_skip is None,
+                disabled_reason=resemble_skip or "",
+                runner=self._resemble_path,
+                done_label="Resemble Enhance complete",
+            )
+
+            # Stage 4 — final loudness normalisation, written straight to out_path
+            print(f"[AUDIO] [{fname}]   Stage 4/4: EBU R128 loudnorm (-18 LUFS)")
+            err = self._loudnorm_path(current, out_path)
+            if err:
+                print(
+                    f"[AUDIO] [{fname}]   Loudness normalise failed: {err} "
+                    f"— writing previous stage output to final"
+                )
+                self._copy_file(current, out_path)
+
+            self._log_size(fname, out_path, "Advanced pipeline finished")
+            return None
+        finally:
+            _safe_remove(scratch_a)
+            _safe_remove(scratch_b)
+            gc.collect()
+
+    def _auto_degrade_to_standard(
+        self, in_path: str, out_path: str, fname: str
+    ) -> Optional[str]:
+        """Drop from advanced → standard for very long files."""
+        print(
+            f"[AUDIO] [{fname}]   Duration > {_ADVANCED_MAX_SECONDS}s — "
+            f"auto-degrading 'advanced' → 'standard' to protect memory"
+        )
+        err = self._enhance_dsp_path(in_path, out_path)
+        if err:
+            self._copy_file(in_path, out_path)
+        return err
+
+    @staticmethod
+    def _resemble_skip_reason(size_mb: float, duration: float) -> Optional[str]:
+        """Return None if Resemble Enhance should run; else the human-readable
+        reason it is being skipped."""
+        if not _has_resemble:
+            return "resemble-enhance not installed"
+        if size_mb > _RESEMBLE_MAX_MB or duration > _RESEMBLE_MAX_SECONDS:
+            return (
+                f"file {size_mb:.0f} MB / {duration:.0f} s exceeds "
+                f"Resemble limits {_RESEMBLE_MAX_MB} MB / "
+                f"{_RESEMBLE_MAX_SECONDS} s — would OOM"
+            )
+        return None
+
+    def _run_stage(
+        self, fname, label, title, current, scratch_a, scratch_b, runner, done_label
+    ):
+        """Execute a stage; on success swap to the alternate scratch, on
+        failure keep *current*. Returns the new current path."""
+        print(f"[AUDIO] [{fname}]   Stage {label}: {title}")
+        next_out = scratch_b if current is scratch_a else scratch_a
+        err = runner(current, next_out)
+        if err:
+            print(f"[AUDIO] [{fname}]   Stage {label} failed: {err} — continuing")
+            return current
+        self._log_size(fname, next_out, done_label)
+        return next_out
+
+    def _run_stage_gated(
+        self, fname, label, title, current, scratch_a, scratch_b,
+        enabled, disabled_reason, runner, done_label,
+    ):
+        """Wrapper for `_run_stage` that prints a SKIPPED line when the
+        stage is gated off by capability/size/duration checks."""
+        if not enabled:
+            print(f"[AUDIO] [{fname}]   Stage {label}: SKIPPED ({disabled_reason})")
+            return current
+        return self._run_stage(
+            fname, label, title, current, scratch_a, scratch_b, runner, done_label
+        )
+
+    @staticmethod
+    def _scratch_wav() -> str:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            return f.name
+
+    @staticmethod
+    def _log_size(fname: str, path: str, label: str) -> None:
+        try:
+            mb = os.path.getsize(path) / 1024 / 1024
+            print(f"[AUDIO] [{fname}]   {label}: {mb:.2f} MB")
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # Stage 1 — Classic DSP via FFmpeg
     # ------------------------------------------------------------------
 
-    # EBU R128 loudness target for speech workflows. The analysis recommends
-    # -20 to -18 LUFS; -18 LUFS keeps headroom while lifting quiet passages.
     _LUFS_TARGET = "-18"
     _TRUE_PEAK = "-1.5"
     _LRA = "11"
 
-    # Speech-friendly bandpass. Keep more high-frequency energy than a phone
-    # filter so weak consonants survive; still rolls off sibilance above 8 kHz.
     _BANDPASS = "highpass=f=80,lowpass=f=8000"
-
-    # Light FFT denoise. Gentler than a hard noise gate so soft tails and
-    # phrase starts are not chopped off.
     _SOFT_DENOISE = "afftdn=nr=12:nf=-40:tn=1"
-
-    # Makeup-gain compressor replaces the old threshold-only compressor.
-    # Lower threshold + lighter ratio + explicit makeup lifts soft phrases
-    # without pumping the loud ones.
     _COMPRESSOR = (
         "acompressor=threshold=-22dB:ratio=2:attack=5:release=50:makeup=4"
     )
 
     def _loudnorm_chain(self) -> str:
-        """EBU R128 two-pass-style single-pass loudnorm string."""
         return (
             f"loudnorm=I={self._LUFS_TARGET}:"
             f"TP={self._TRUE_PEAK}:LRA={self._LRA}"
         )
 
-    def _enhance_dsp(self, wav_bytes: bytes) -> Tuple[bytes, Optional[str]]:
-        """Speech-optimised FFmpeg chain with LUFS normalisation.
-
-        Replaces the previous ``highpass=200, lowpass=3000, dynaudnorm,
-        acompressor`` chain with:
-
-        1. ``highpass=80, lowpass=8000``  — preserve consonants
-        2. ``afftdn``                      — soft FFT denoise (instead of
-           a hard noise gate that nibbles phrase starts)
-        3. ``acompressor ... makeup=4``    — lift soft speech without
-           pumping loud speech
-        4. ``loudnorm I=-18``              — EBU R128 loudness target so
-           the whole file sits at a consistent level
-        """
-        temp_in = None
-        temp_out = None
+    def _enhance_dsp_path(self, in_path: str, out_path: str) -> Optional[str]:
+        """Speech-optimised FFmpeg chain with LUFS normalisation, on disk."""
+        af_chain = ",".join([
+            self._BANDPASS,
+            self._SOFT_DENOISE,
+            self._COMPRESSOR,
+            self._loudnorm_chain(),
+        ])
+        cmd = [
+            "ffmpeg",
+            *_FFMPEG_INPUT_FLAGS,
+            "-i", in_path,
+            "-af", af_chain,
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            "-y",
+            out_path,
+        ]
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_in = f.name
-                f.write(wav_bytes)
-
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_out = f.name
-
-            af_chain = ",".join([
-                self._BANDPASS,
-                self._SOFT_DENOISE,
-                self._COMPRESSOR,
-                self._loudnorm_chain(),
-            ])
-
-            cmd = [
-                "ffmpeg",
-                "-i", temp_in,
-                "-af", af_chain,
-                "-acodec", "pcm_s16le",
-                "-ar", "16000",
-                "-ac", "1",
-                "-y",
-                temp_out,
-            ]
-
-            result = subprocess.run(  # nosec B603 - fixed argv, no shell
-                cmd, capture_output=True, text=True, timeout=1800, check=False
-            )
+            result = _ffmpeg_run(cmd)
             if result.returncode != 0:
-                return wav_bytes, f"FFmpeg DSP failed: {result.stderr[:500]}"
-
-            if not os.path.exists(temp_out):
-                return wav_bytes, "FFmpeg DSP produced no output file"
-
-            with open(temp_out, "rb") as f:
-                enhanced = f.read()
-
-            if len(enhanced) == 0:
-                return wav_bytes, "FFmpeg DSP produced empty output"
-
-            return enhanced, None
-
+                return f"FFmpeg DSP failed: {result.stderr[-500:]}"
+            if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+                return "FFmpeg DSP produced empty output"
+            return None
         except subprocess.TimeoutExpired:
-            return wav_bytes, "FFmpeg DSP timed out"
+            return "FFmpeg DSP timed out"
         except (OSError, ValueError) as e:
-            return wav_bytes, f"FFmpeg DSP error: {e}"
-        finally:
-            for p in (temp_in, temp_out):
-                if p and os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
+            return f"FFmpeg DSP error: {e}"
 
     # ------------------------------------------------------------------
     # Adaptive profiling — decide clean vs noisy-room before denoise
@@ -314,24 +429,16 @@ class AudioEnhancer:
             return -60.0
         if data.ndim > 1:
             data = data.mean(axis=1)
-        # 50 ms frames @ 16 kHz ≈ 800 samples
-        frame = 800
+        frame = 800  # 50 ms @ 16 kHz
         n = (data.size // frame) * frame
         if n == 0:
             return -60.0
         frames = data[:n].reshape(-1, frame)
         rms = np.sqrt(np.mean(frames * frames, axis=1) + 1e-12)
-        # Use the 10th percentile as the floor estimate
         floor = float(np.percentile(rms, 10))
         return 20.0 * float(np.log10(max(floor, 1e-7)))
 
     def _pick_denoise_strength(self, noise_floor_db: float) -> float:
-        """Adaptive prop_decrease.
-
-        Clean speech (floor <= -50 dB) -> 0.45 (barely touch it)
-        Normal room (-50..-40 dB)      -> 0.55 (recommended default)
-        Noisy room  (floor >  -40 dB)  -> 0.65 (still below old 0.75)
-        """
         if noise_floor_db <= -50.0:
             return 0.45
         if noise_floor_db <= -40.0:
@@ -339,123 +446,243 @@ class AudioEnhancer:
         return 0.65
 
     # ------------------------------------------------------------------
-    # Stage 2 — Spectral Gating via noisereduce
+    # Stage 2 — Spectral Gating via noisereduce (chunked for long inputs)
     # ------------------------------------------------------------------
 
-    def _enhance_spectral(self, wav_bytes: bytes) -> Tuple[bytes, Optional[str]]:
-        """Adaptive spectral gating.
+    def _spectral_path(
+        self,
+        in_path: str,
+        out_path: str,
+        duration: float,
+        fname: str,
+    ) -> Optional[str]:
+        """Dispatch single-pass vs chunked spectral denoise based on duration."""
+        if duration <= _CHUNK_THRESHOLD_SECONDS:
+            return self._spectral_single(in_path, out_path, duration)
+        return self._spectral_chunked(in_path, out_path, duration, fname)
 
-        Replaces the old fixed two-pass noisereduce (stationary @ 0.75 +
-        non-stationary @ 0.5) with an adaptive strategy that keeps weak
-        consonants intact:
-
-        * Estimate the noise floor and pick ``prop_decrease`` in
-          ``[0.45, 0.55, 0.65]`` (clean / normal / noisy).
-        * Run a single non-stationary pass — modern ``noisereduce``
-          handles both noise types in one pass and a second stationary
-          pass at 0.75 was over-attenuating phonemes during low-SNR
-          moments.
-        """
-        temp_in = None
-        temp_out = None
+    def _spectral_single(
+        self, in_path: str, out_path: str, duration: float
+    ) -> Optional[str]:
+        """Single-pass adaptive spectral gating (short files)."""
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_in = f.name
-                f.write(wav_bytes)
-
-            data, rate = sf.read(temp_in, dtype="float32")
-
+            data, rate = sf.read(in_path, dtype="float32")
             noise_floor_db = self._estimate_noise_floor_db(data)
             prop = self._pick_denoise_strength(noise_floor_db)
+            n_fft = 1024 if duration > _LONG_AUDIO_THRESHOLD_SECONDS else 2048
             print(
-                f"[AUDIO]   Adaptive denoise: noise_floor={noise_floor_db:.1f} dBFS "
-                f"-> prop_decrease={prop:.2f}"
+                f"[AUDIO]   Adaptive denoise: "
+                f"noise_floor={noise_floor_db:.1f} dBFS "
+                f"prop_decrease={prop:.2f} n_fft={n_fft}"
             )
-
             cleaned = nr.reduce_noise(
                 y=data,
                 sr=rate,
                 stationary=False,
                 prop_decrease=prop,
-                n_fft=2048,
+                n_fft=n_fft,
                 n_jobs=1,
             )
-
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_out = f.name
-
-            sf.write(temp_out, cleaned, rate, subtype="PCM_16")
-
-            with open(temp_out, "rb") as f:
-                enhanced = f.read()
-
-            if len(enhanced) == 0:
-                return wav_bytes, "noisereduce produced empty output"
-
-            return enhanced, None
-
+            sf.write(out_path, cleaned, rate, subtype="PCM_16")
+            del data, cleaned
+            gc.collect()
+            if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+                return "noisereduce produced empty output"
+            return None
         except (OSError, ValueError, RuntimeError) as e:
-            return wav_bytes, f"noisereduce error: {e}"
-        finally:
-            for p in (temp_in, temp_out):
-                if p and os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
+            return f"noisereduce error: {e}"
 
-    # ------------------------------------------------------------------
-    # Final LUFS pass — fixes intra-file quiet/loud phases
-    # ------------------------------------------------------------------
+    def _spectral_chunked(
+        self, in_path: str, out_path: str, duration: float, fname: str
+    ) -> Optional[str]:
+        """Chunked spectral denoise for long files.
 
-    def _apply_loudnorm(self, wav_bytes: bytes) -> Tuple[bytes, Optional[str]]:
-        """Run an EBU R128 loudness-target pass. This is the single most
-        important change for speech workflows: it replaces peak-based
-        normalisation (which is blind to intra-file quiet phases)."""
-        temp_in = None
-        temp_out = None
+        Strategy:
+          1. ``ffmpeg -f segment -segment_time 300`` to split into 5 min
+             WAV chunks (no re-encode).
+          2. Run noisereduce on each chunk independently, freeing memory
+             between chunks.
+          3. Concat the cleaned chunks back with ``ffmpeg -f concat``.
+        """
+        chunk_dir = tempfile.mkdtemp(prefix="ae_chunks_")
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_in = f.name
-                f.write(wav_bytes)
+            chunks, err = self._split_into_chunks(in_path, chunk_dir)
+            if err:
+                return err
 
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_out = f.name
-
-            cmd = [
-                "ffmpeg",
-                "-i", temp_in,
-                "-af", self._loudnorm_chain(),
-                "-acodec", "pcm_s16le",
-                "-ar", "16000",
-                "-ac", "1",
-                "-y",
-                temp_out,
-            ]
-            result = subprocess.run(  # nosec B603 - fixed argv, no shell
-                cmd, capture_output=True, text=True, timeout=1800, check=False
+            n_fft = 1024 if duration > _LONG_AUDIO_THRESHOLD_SECONDS else 2048
+            print(
+                f"[AUDIO] [{fname}]   Chunked denoise: {len(chunks)} × "
+                f"{_CHUNK_SECONDS}s, n_fft={n_fft}"
             )
-            if result.returncode != 0:
-                return wav_bytes, f"loudnorm failed: {result.stderr[:300]}"
-            if not os.path.exists(temp_out):
-                return wav_bytes, "loudnorm produced no output file"
 
-            with open(temp_out, "rb") as f:
-                enhanced = f.read()
-            if len(enhanced) == 0:
-                return wav_bytes, "loudnorm produced empty output"
-            return enhanced, None
-        except subprocess.TimeoutExpired:
-            return wav_bytes, "loudnorm timed out"
-        except (OSError, ValueError) as e:
-            return wav_bytes, f"loudnorm error: {e}"
+            prop = self._estimate_chunk_prop(chunks[0], fname)
+            cleaned_paths = self._denoise_each_chunk(
+                chunks, chunk_dir, prop, n_fft, fname
+            )
+            return self._concat_chunks(cleaned_paths, chunk_dir, out_path)
+        except (OSError, ValueError, RuntimeError) as e:
+            return f"chunked spectral error: {e}"
         finally:
-            for p in (temp_in, temp_out):
-                if p and os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
+            self._cleanup_dir(chunk_dir)
+            gc.collect()
+
+    @staticmethod
+    def _split_into_chunks(
+        in_path: str, chunk_dir: str
+    ) -> Tuple[List[str], Optional[str]]:
+        """Run the ffmpeg segmenter and list the resulting chunk paths."""
+        seg_pattern = os.path.join(chunk_dir, "in_%04d.wav")
+        split_cmd = [
+            "ffmpeg",
+            *_FFMPEG_INPUT_FLAGS,
+            "-i", in_path,
+            "-f", "segment",
+            "-segment_time", str(_CHUNK_SECONDS),
+            "-c", "copy",
+            "-reset_timestamps", "1",
+            "-y",
+            seg_pattern,
+        ]
+        split_res = _ffmpeg_run(split_cmd)
+        if split_res.returncode != 0:
+            return [], f"chunk split failed: {split_res.stderr[-300:]}"
+        chunks = sorted(
+            os.path.join(chunk_dir, f)
+            for f in os.listdir(chunk_dir)
+            if f.startswith("in_") and f.endswith(".wav")
+        )
+        if not chunks:
+            return [], "chunk split produced no segments"
+        return chunks, None
+
+    def _estimate_chunk_prop(self, first_chunk: str, fname: str) -> float:
+        """Estimate noise floor from the first chunk only — speech recordings
+        rarely change room/noise mid-file, and probing once saves RAM."""
+        first_data, first_rate = sf.read(first_chunk, dtype="float32")
+        noise_floor_db = self._estimate_noise_floor_db(first_data)
+        prop = self._pick_denoise_strength(noise_floor_db)
+        del first_data
+        gc.collect()
+        print(
+            f"[AUDIO] [{fname}]   Adaptive (from chunk 0): "
+            f"noise_floor={noise_floor_db:.1f} dBFS "
+            f"prop_decrease={prop:.2f} sample_rate={first_rate}"
+        )
+        return prop
+
+    def _denoise_one_chunk(
+        self, chunk_in: str, chunk_out: str, prop: float, n_fft: int
+    ) -> Optional[str]:
+        """Run noisereduce on a single chunk; return error string or None."""
+        try:
+            data, rate = sf.read(chunk_in, dtype="float32")
+            cleaned = nr.reduce_noise(
+                y=data,
+                sr=rate,
+                stationary=False,
+                prop_decrease=prop,
+                n_fft=n_fft,
+                n_jobs=1,
+            )
+            sf.write(chunk_out, cleaned, rate, subtype="PCM_16")
+            del data, cleaned
+            return None
+        except (OSError, ValueError, RuntimeError) as e:
+            return str(e)
+        finally:
+            gc.collect()
+
+    def _denoise_each_chunk(
+        self,
+        chunks: List[str],
+        chunk_dir: str,
+        prop: float,
+        n_fft: int,
+        fname: str,
+    ) -> List[str]:
+        """Iterate chunk-by-chunk; collect cleaned paths (raw on failure)."""
+        cleaned_paths: List[str] = []
+        for idx, chunk_in in enumerate(chunks):
+            chunk_out = os.path.join(chunk_dir, f"out_{idx:04d}.wav")
+            err = self._denoise_one_chunk(chunk_in, chunk_out, prop, n_fft)
+            if err is None:
+                cleaned_paths.append(chunk_out)
+                _safe_remove(chunk_in)
+            else:
+                print(
+                    f"[AUDIO] [{fname}]   Chunk {idx} denoise failed: {err} "
+                    f"— using raw chunk"
+                )
+                cleaned_paths.append(chunk_in)
+        return cleaned_paths
+
+    @staticmethod
+    def _concat_chunks(
+        cleaned_paths: List[str], chunk_dir: str, out_path: str
+    ) -> Optional[str]:
+        """Build the ffmpeg concat list and stitch the cleaned chunks back."""
+        list_path = os.path.join(chunk_dir, "concat.txt")
+        with open(list_path, "w", encoding="utf-8") as f:
+            for p in cleaned_paths:
+                safe = p.replace("\\", "/").replace("'", "'\\''")
+                f.write(f"file '{safe}'\n")
+
+        concat_cmd = [
+            "ffmpeg",
+            *_FFMPEG_INPUT_FLAGS,
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_path,
+            "-c", "copy",
+            "-y",
+            out_path,
+        ]
+        concat_res = _ffmpeg_run(concat_cmd)
+        if concat_res.returncode != 0:
+            return f"chunk concat failed: {concat_res.stderr[-300:]}"
+        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+            return "chunk concat produced empty output"
+        return None
+
+    @staticmethod
+    def _cleanup_dir(chunk_dir: str) -> None:
+        """Best-effort cleanup of a scratch directory."""
+        try:
+            for f in os.listdir(chunk_dir):
+                _safe_remove(os.path.join(chunk_dir, f))
+            os.rmdir(chunk_dir)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Final LUFS pass
+    # ------------------------------------------------------------------
+
+    def _loudnorm_path(self, in_path: str, out_path: str) -> Optional[str]:
+        """Run an EBU R128 loudness-target pass on disk."""
+        cmd = [
+            "ffmpeg",
+            *_FFMPEG_INPUT_FLAGS,
+            "-i", in_path,
+            "-af", self._loudnorm_chain(),
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            "-y",
+            out_path,
+        ]
+        try:
+            result = _ffmpeg_run(cmd)
+            if result.returncode != 0:
+                return f"loudnorm failed: {result.stderr[-300:]}"
+            if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+                return "loudnorm produced empty output"
+            return None
+        except subprocess.TimeoutExpired:
+            return "loudnorm timed out"
+        except (OSError, ValueError) as e:
+            return f"loudnorm error: {e}"
 
     # ------------------------------------------------------------------
     # Stage 3 — Resemble Enhance (AI denoiser + enhancer, CPU)
@@ -465,65 +692,51 @@ class AudioEnhancer:
         """Resample WAV file to 16 kHz in-place using FFmpeg."""
         temp_resampled = wav_path + ".16k.wav"
         try:
-            resample_cmd = [
-                "ffmpeg", "-i", wav_path,
+            cmd = [
+                "ffmpeg",
+                *_FFMPEG_INPUT_FLAGS,
+                "-i", wav_path,
                 "-ar", "16000", "-ac", "1",
                 "-acodec", "pcm_s16le", "-y",
                 temp_resampled,
             ]
-            subprocess.run(  # nosec B603 - fixed argv, no shell
-                resample_cmd, capture_output=True, text=True, timeout=600, check=False
-            )
+            _ffmpeg_run(cmd, timeout=600)
             if os.path.exists(temp_resampled) and os.path.getsize(temp_resampled) > 0:
                 os.replace(temp_resampled, wav_path)
         finally:
-            if os.path.exists(temp_resampled):
-                try:
-                    os.remove(temp_resampled)
-                except OSError:
-                    pass
+            _safe_remove(temp_resampled)
 
-    def _enhance_resemble(self, wav_bytes: bytes) -> Tuple[bytes, Optional[str]]:
-        """Run Resemble Enhance denoiser + enhancer on CPU."""
-        temp_in = None
-        temp_out = None
+    def _resemble_path(self, in_path: str, out_path: str) -> Optional[str]:
+        """Run Resemble Enhance denoiser + enhancer on CPU, on disk."""
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_in = f.name
-                f.write(wav_bytes)
-
-            data, rate = sf.read(temp_in, dtype="float32")
+            data, rate = sf.read(in_path, dtype="float32")
             audio_tensor = torch.from_numpy(data).unsqueeze(0)  # (1, samples)
+            del data
             device = torch.device("cpu")
 
             denoised = denoise(audio_tensor, rate, device)
+            del audio_tensor
+            gc.collect()
+
             enhanced_tensor, new_rate = resemble_enhance_fn(
                 denoised, rate, device, nfe=32
             )
+            del denoised
+            gc.collect()
 
             enhanced_np = enhanced_tensor.squeeze(0).cpu().numpy()
+            del enhanced_tensor
+            gc.collect()
 
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_out = f.name
-            sf.write(temp_out, enhanced_np, new_rate, subtype="PCM_16")
+            sf.write(out_path, enhanced_np, new_rate, subtype="PCM_16")
+            del enhanced_np
+            gc.collect()
 
             if new_rate != 16000:
-                self._resample_to_16k(temp_out)
+                self._resample_to_16k(out_path)
 
-            with open(temp_out, "rb") as f:
-                enhanced = f.read()
-
-            if len(enhanced) == 0:
-                return wav_bytes, "Resemble Enhance produced empty output"
-
-            return enhanced, None
-
+            if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+                return "Resemble Enhance produced empty output"
+            return None
         except (OSError, ValueError, RuntimeError) as e:
-            return wav_bytes, f"Resemble Enhance error: {e}"
-        finally:
-            for p in (temp_in, temp_out):
-                if p and os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
+            return f"Resemble Enhance error: {e}"

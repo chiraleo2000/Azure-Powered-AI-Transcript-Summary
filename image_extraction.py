@@ -1,3 +1,8 @@
+# pylint: disable=no-member
+# OpenCV (`cv2`) exposes its bindings dynamically from the C++ layer,
+# so static analysers such as pylint cannot see attributes like
+# cv2.VideoCapture / cv2.cvtColor / cv2.CAP_PROP_*. Disabling no-member
+# at module scope removes ~60 spurious E1101 diagnostics in this file.
 import os
 import cv2
 import numpy as np
@@ -416,7 +421,7 @@ class VideoFrameExtractor:
         except Exception:
             return True
     
-    def _detect_people_presence(self, frame: np.ndarray) -> bool:
+    def _detect_people_presence(self, _frame: np.ndarray) -> bool:
         """Simple detection of people in frame (could be enhanced with face detection)"""
         try:
             # Placeholder for people detection
@@ -636,8 +641,13 @@ class VideoFrameExtractor:
             small_frame = cv2.resize(frame, (16, 16))
             gray_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
             
-            # Create hash from pixel values
-            frame_hash = hashlib.md5(gray_frame.tobytes()).hexdigest()
+            # Create hash from pixel values. usedforsecurity=False marks
+            # this MD5 as a non-cryptographic content fingerprint (frame
+            # dedup) so static-analysis security scanners (Bandit B324,
+            # CWE-327) recognise it is not used to protect anything.
+            frame_hash = hashlib.md5(
+                gray_frame.tobytes(), usedforsecurity=False
+            ).hexdigest()
             return frame_hash
             
         except Exception as e:
