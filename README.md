@@ -1,336 +1,248 @@
-# 🎙️ AI Meeting Summary v0.2.0
+# AI Meeting Summary (Current)
 
-> Azure-powered meeting transcription and AI summarization service with enterprise-grade security
+Azure-powered transcription and AI summarization web application, built with Gradio and secured with Azure Key Vault.
 
-A full-stack web application that converts audio/video recordings into text transcripts and generates intelligent meeting summaries using Azure AI services. Now with **Azure Key Vault integration** for secure secret management.
-
----
-
-## 🏗️ Architecture Overview
-
-```text
-┌─────────────────────────────────────────────┐
-│           Gradio Web UI (app.py)            │
-│         Desktop-first responsive UI         │
-├─────────────────────────────────────────────┤
-│        UI Functions (app_func.py)           │
-│   Auth, Transcription, AI Summary handlers  │
-├──────────┬──────────┬───────────────────────┤
-│ backend  │ ai_summary│  session_manager     │
-│  .py     │   .py     │      .py             │
-│ Storage  │ GPT-4.1   │  OAuth2-style        │
-│ Auth     │ Summary   │  Sessions            │
-│ STT/LLM  │ Engine    │  60min timeout       │
-├──────────┴──────────┴───────────────────────┤
-│       config.py + azure_keyvault_client.py  │
-│         🔐 Secure Secret Management         │
-├─────────────────────────────────────────────┤
-│           Azure Cloud Services              │
-│  Speech STT │ OpenAI │ Blob Storage │ Vision│
-│  🔑 Azure Key Vault (Secret Management)     │
-└─────────────────────────────────────────────┘
-```
-
-## 🔐 Security Features (v0.2.0)
-
-### Enterprise-Grade Secret Management
-
-- ✅ **Azure Key Vault Integration**: All secrets stored securely in Azure Key Vault
-- ✅ **Managed Identity**: Passwordless authentication using Azure Managed Identity
-- ✅ **Zero Hardcoded Secrets**: No secrets in code, config files, or containers
-- ✅ **Automatic Secret Rotation**: Support for key rotation without downtime
-- ✅ **Audit Logging**: Complete audit trail of secret access
-- ✅ **RBAC**: Role-based access control with least privilege
-
-### Infrastructure as Code
-
-- 📄 **Bicep Templates**: Complete infrastructure deployment automation
-- 🚀 **One-Click Deployment**: Deploy entire stack with single command
-- 🔄 **Reproducible**: Consistent deployments across environments
-- 📊 **Version Controlled**: Infrastructure changes tracked in Git
-
-See [SECURITY.md](SECURITY.md) for detailed security documentation.
-
-## ✨ Features
-
-### 🎙️ Audio Transcription
-
-- **Azure Speech-to-Text (STT)**: Standard transcription for all audio/video files up to 500MB
-- **Audio conversion**: Automatic FFmpeg conversion to WAV for all formats
-- **Speaker diarization**: Identify and label different speakers
-- **Multi-language**: Thai, English, Chinese, Japanese, Korean, and 10+ more
-
-### 🤖 AI Meeting Summary
-
-- **GPT-4.1-mini** powered summarization with 128K context window
-- Multiple summary formats:
-  - 📋 Internal meeting reports
-  - 📊 Executive summaries
-  - 🤝 External meeting reports
-  - 📚 Learning/seminar summaries
-- Document upload support (PDF, DOCX, PPTX, XLSX, TXT)
-- Multi-language output
-
-### 🔐 Security & Auth
-
-- User registration with PDPA/GDPR compliance
-- Password hashing with salted SHA-256
-- OAuth2-style session tickets (60-minute inactivity timeout)
-- Session persistence across page refreshes via browser localStorage
-- Non-root Docker user
-
-### ☁️ Cloud Storage
-
-- **Azure Blob Storage only** — no local database
-- Automatic 30-day data cleanup
-- Container-level SAS token authentication
-- User data export and account deletion (PDPA compliance)
+Current app version in code: `0.1.34` (from `app.py`).
 
 ---
 
-## 📁 Project Structure
+## What This Project Does
+
+- Converts uploaded audio/video into transcript text with Azure Speech Services
+- Generates structured AI summaries from transcript text and optional attached documents
+- Supports account registration/login, session persistence, and password reset
+- Stores operational data in Azure Blob Storage (blob-first architecture)
+- Uses Azure Key Vault for secure secret retrieval in production
+
+---
+
+## Core Features
+
+### Transcription
+
+- Audio and video upload
+- Multi-language speech recognition
+- Optional speaker diarization
+- Optional timestamps, punctuation mode, profanity mode
+- Optional audio enhancement pipeline
+
+### AI Summary
+
+- Azure OpenAI-based summary generation
+- Multiple summary formats (meeting, executive, external, learning, custom)
+- Optional additional instruction prompt
+- Optional supporting document uploads (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.txt`)
+
+### User & Privacy
+
+- User registration and login
+- Consent collection (GDPR/data retention/marketing)
+- Session management with inactivity timeout
+- Export user data and delete account flows
+
+### Storage & Operations
+
+- Azure Blob containers for transcripts, summaries, user/auth, metadata
+- Background cleanup job for old data
+- Docker image hardened to run as non-root user
+
+---
+
+## Project Structure
 
 ```text
-├── app.py                  # Main Gradio web interface
-├── app_func.py             # UI event handlers and business logic
-├── backend.py              # Backend: Auth, Storage, Transcription (Azure STT)
-├── ai_summary.py           # AI summarization engine (GPT-4.1-mini)
-├── session_manager.py      # OAuth2-style session management
-├── file_processors.py      # Document text extraction (PDF, DOCX, PPTX, etc.)
-├── image_extraction.py     # Video frame extraction and image analysis
+.
+├── app.py
+├── app_func.py
+├── backend.py
+├── ai_summary.py
+├── config.py
+├── azure_keyvault_client.py
+├── session_manager.py
+├── file_processors.py
+├── image_extraction.py
+├── audio_enhancer.py
+├── error_logger.py
+├── Dockerfile
+├── requirements.txt
+├── docker-deploy-azure.ps1
+├── infrastructure/
+│   ├── main.bicep
+│   ├── main.parameters.json
+│   ├── deploy.ps1
+│   ├── set-keyvault-secrets.ps1
+│   └── README.md
 ├── src/
 │   ├── ui/
-│   │   └── styles.py       # CSS and JavaScript for Gradio UI
+│   │   └── styles.py
 │   └── utils/
-│       └── file_helpers.py  # File path and type utilities
-├── static/                 # Static assets (logo, favicon)
-├── requirements.txt        # Python dependencies
-├── Dockerfile              # Security-hardened container image
-├── .dockerignore           # Docker build exclusions
-└── .env                    # Environment configuration (secrets)
+│       └── file_helpers.py
+├── static/
+└── local_storage/
 ```
 
 ---
 
-## 🚀 Quick Start
+## Requirements
 
-### Prerequisites
+- Python `3.11+`
+- FFmpeg installed and available in PATH
+- Azure resources for:
+  - Speech Service (at least one key: primary or backup)
+  - Azure OpenAI
+  - Azure Blob Storage
+  - Computer Vision
+  - Azure Key Vault (recommended for production)
 
-- Python 3.11+
-- FFmpeg installed (`apt-get install ffmpeg` or `choco install ffmpeg`)
-- Azure account with:
-  - Speech Services
-  - OpenAI Service (GPT-4.1-mini)
-  - Blob Storage
-  - Computer Vision (optional, for image analysis)
+---
 
-### Local Development
+## Local Development
+
+### 1. Install dependencies
 
 ```bash
-# 1. Clone and install dependencies
 pip install -r requirements.txt
-
-# 2. Configure environment
-cp .env.example .env
-# Edit .env with your Azure credentials
-
-# 3. Run the application
-python app.py
-# Opens at http://localhost:7860
 ```
 
-### Docker
+### 2. Configure environment
+
+Create a `.env` file in the project root (this repository currently does not include `.env.example`).
+
+Minimum required values for local run without Key Vault:
+
+```env
+USE_KEY_VAULT=False
+
+# Speech: provide at least one key
+AZURE_SPEECH_KEY=<speech-primary-key>
+# AZURE_SPEECH_KEY_BACKUP=<speech-backup-key>
+AZURE_SPEECH_KEY_ENDPOINT=<speech-endpoint>
+AZURE_REGION=<speech-region>
+
+# OpenAI
+AZURE_OPENAI_ENDPOINT=<openai-endpoint>
+AZURE_OPENAI_KEY=<openai-key>
+AZURE_OPENAI_DEPLOYMENT=gpt-5.4-nano
+AZURE_OPENAI_API_VERSION=2025-01-01-preview
+
+# Blob Storage
+AZURE_BLOB_CONNECTION=<storage-connection-string>
+AZURE_STORAGE_ACCOUNT_NAME=<storage-account-name>
+AZURE_CONTAINER=transcripts
+CHAT_RESPONSES_CONTAINER=response-chats
+USER_PASSWORD_CONTAINER=user-password
+META_DATA_CONTAINER=meta-storage
+
+# Computer Vision
+COMPUTER_VISION_ENDPOINT=<computer-vision-endpoint>
+COMPUTER_VISION_KEY=<computer-vision-key>
+COMPUTER_VISION_REGION=southeastasia
+
+# Security
+PASSWORD_SALT=<strong-random-salt>
+```
+
+### 3. Run app
 
 ```bash
-# Start locally with Docker Compose (.env is injected at runtime)
-docker compose up --build -d
-
-# Or run the image directly with your local .env
-docker build -t ai-summary-meeting:0.1.24 .
-docker run -p 7860:7860 --env-file .env -e USE_KEY_VAULT=False ai-summary-meeting:0.1.24
+python app.py
 ```
 
-For local Docker, keep API keys in `.env`. The image does not copy `.env` during build; Docker Compose and `docker run --env-file .env` pass those values into the container at runtime.
+Default URL: `http://localhost:7860`
 
 ---
 
-## ⚙️ Environment Variables
+## Running With Docker
 
-All configuration is loaded from `.env` via `python-dotenv`. Key variables:
+Build:
 
-| Variable | Description |
-| --- | --- |
-| `AZURE_SPEECH_KEY` | Azure Speech Services API key |
-| `AZURE_SPEECH_KEY_ENDPOINT` | Speech Services endpoint URL |
-| `AZURE_REGION` | Azure region (e.g., `westus`) |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint |
-| `AZURE_OPENAI_KEY` | Azure OpenAI API key |
-| `AZURE_OPENAI_DEPLOYMENT` | Model deployment name (e.g., `gpt-4.1-mini`) |
-| `AZURE_BLOB_CONNECTION` | Azure Blob Storage connection string |
-| `AZURE_STORAGE_ACCOUNT_NAME` | Storage account name |
-| `AZURE_CONTAINER` | Main transcripts container |
-| `CHAT_RESPONSES_CONTAINER` | AI summary responses container |
-| `USER_PASSWORD_CONTAINER` | User credentials container |
-| `META_DATA_CONTAINER` | Metadata storage container |
+```bash
+docker build -t ai-meeting-summary:latest .
+```
 
-See `.env.example` for the complete list of configuration options. In production, secrets are automatically loaded from Azure Key Vault.
+Run locally using `.env` and disable Key Vault mode explicitly:
+
+```bash
+docker run --rm -p 7860:7860 --env-file .env -e USE_KEY_VAULT=False ai-meeting-summary:latest
+```
+
+Notes:
+
+- Dockerfile defaults `USE_KEY_VAULT=True` for cloud usage
+- Container listens on port `7860`
+- Image runs as non-root user
 
 ---
 
-## 🚀 Deployment
+## Azure Deployment
 
-### Deployment Prerequisites
+### Option A: Full Infrastructure + App Deploy (Bicep + ACR Build)
 
-- Azure subscription with appropriate permissions
-- Azure CLI installed
-- PowerShell 7+ (for deployment scripts)
-
-### Option 1: Automated Infrastructure Deployment (Recommended)
-
-Deploy complete infrastructure using Bicep:
+From `infrastructure/`:
 
 ```powershell
-# Navigate to infrastructure directory
-cd infrastructure
-
-# Run deployment script
-.\deploy.ps1 -ResourceGroupName "AI-Summary-Internal" -Location "southeastasia"
-
-# Configure secrets in Key Vault
-.\set-keyvault-secrets.ps1 -KeyVaultName "ai-summary-keyvault"
+.\deploy.ps1 -ResourceGroupName "ai-summary-prod-rg" -Location "southeastasia"
 ```
 
-This deploys:
+This script deploys infrastructure and can trigger ACR cloud build/push.
 
-- App Service (with Managed Identity)
-- Azure OpenAI (GPT-4.1 Mini)
-- Speech Services (Primary + Backup)
-- Computer Vision (OCR)
-- Storage Account (with containers)
-- Key Vault access policies
+### Option B: Configure Key Vault Secrets
 
-See [infrastructure/README.md](infrastructure/README.md) for detailed deployment documentation.
-
-### Option 2: Manual Setup
-
-1. **Create Azure Resources**:
-   - App Service (Linux, Python 3.11)
-   - Cognitive Services (OpenAI, Speech, Computer Vision)
-   - Storage Account with containers
-   - Key Vault
-
-2. **Configure Managed Identity**:
-
-   ```bash
-   az webapp identity assign --name <app-name> --resource-group <rg-name>
-   ```
-
-3. **Grant Key Vault Access**:
-
-   ```bash
-   az keyvault set-policy --name <kv-name> \
-     --object-id <managed-identity-id> \
-     --secret-permissions get list
-   ```
-
-4. **Set Secrets**:
-
-   ```bash
-   az keyvault secret set --vault-name <kv-name> \
-     --name "azure-openai-key" --value "<your-key>"
-   ```
-
-5. **Configure App Settings**:
-
-   ```bash
-   az webapp config appsettings set --name <app-name> \
-     --settings USE_KEY_VAULT=True \
-     AZURE_KEY_VAULT_URL=https://<kv-name>.vault.azure.net/
-   ```
-
-### Local Development Setup
-
-```bash
-# Clone repository
-git clone <repo-url>
-cd Azure_Powered_AI_SummaryV0.2
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Copy and configure environment
-cp .env.example .env
-nano .env  # Add your development secrets
-
-# Run application
-python app.py
+```powershell
+.\set-keyvault-secrets.ps1 -KeyVaultName "ai-summary-prod-kv" -ResourceGroupName "ai-summary-prod-rg" -Interactive
 ```
 
-For local development, set `USE_KEY_VAULT=False` in `.env` to use environment variables instead of Key Vault.
+Or import from local env file:
+
+```powershell
+.\set-keyvault-secrets.ps1 -KeyVaultName "ai-summary-prod-kv" -ResourceGroupName "ai-summary-prod-rg" -FromEnvFile -EnvFilePath ".env"
+```
+
+### Option C: Docker-to-App Service Deployment
+
+From repository root:
+
+```powershell
+.\docker-deploy-azure.ps1 -ResourceGroup "AI-Summary-Internal" -AppServiceName "ai-summarize-service"
+```
 
 ---
 
-## 🐳 Docker Deployment
+## Configuration Notes
 
-### Local Build & Run
-
-```bash
-docker build -t ai-summary-meeting:0.1.24 .
-docker run -d -p 7860:7860 --name ai-summary ai-summary-meeting:0.1.24
-```
-
-### Azure Container Registry
-
-```bash
-# Tag and push
-docker tag ai-summary-meeting:0.1.24 ocrservicecontainer-b5c7dsegfybsh9cm.azurecr.io/ai-summary-meeting:0.1.24
-docker push ocrservicecontainer-b5c7dsegfybsh9cm.azurecr.io/ai-summary-meeting:0.1.24
-```
-
-### Security Notes
-
-- ✅ Non-root user in container
-- ✅ No secrets baked as ENV in Dockerfile (loaded from .env at runtime)
-- ✅ Minimal base image (`python:3.11-slim`)
-- ✅ Only required files copied (explicit COPY, not `*.py`)
-- ⚠️ For production: use Azure Key Vault or `--env-file` instead of baking `.env`
+- `USE_KEY_VAULT=True` and `AZURE_KEY_VAULT_URL=<vault-url>` enable secure secret loading
+- If Key Vault access fails, the app falls back to environment variables
+- At startup, config validation enforces critical keys/secrets
+- Speech service requires at least one key (`AZURE_SPEECH_KEY` or `AZURE_SPEECH_KEY_BACKUP`)
 
 ---
 
-## 📋 Changelog
+## Tech Stack
 
-### v0.2.0 (2026-02-18) - Security & Infrastructure Release
-
-- 🔐 **Azure Key Vault Integration**: All secrets now managed securely in Key Vault
-- 🏗️ **Infrastructure as Code**: Complete Bicep templates for automated deployment
-- 🔑 **Managed Identity**: Passwordless authentication for all Azure services
-- 📜 **Deployment Scripts**: PowerShell scripts for infrastructure and secret management
-- 🛡️ **Security Hardening**:
-  - Removed hardcoded secrets from codebase
-  - Added `.env.example` with placeholders
-  - Created comprehensive `.gitignore`
-  - Added `SECURITY.md` documentation
-- 🐛 **Code Quality Fixes**:
-  - Fixed SonarLint issues (f-strings, unused variables)
-  - Improved error handling
-  - Added secure configuration module (`config.py`)
-  - Created Key Vault client (`azure_keyvault_client.py`)
-- 📚 **Documentation**:
-  - Comprehensive deployment guides
-  - Security best practices
-  - Infrastructure documentation
-
-### v0.1.24 (2026-02-10)
-
-- 🧹 **Project cleanup**: Removed unused files, cache, duplicate modules
-- 🔒 **Dockerfile security**: Removed hardcoded secrets, added non-root user
-- 📁 **File consolidation**: Reduced from 15+ Python files to 7 core + 2 utility
-- 🐛 **Code Quality Fixes**:
+- Python 3.11
+- Gradio UI
+- Azure Speech Services
+- Azure OpenAI
+- Azure Blob Storage
+- Azure Key Vault + Managed Identity (production)
+- Azure Computer Vision
 
 ---
 
-## 📞 Support
+## Troubleshooting
 
-Developed by **BeTimes Solutions**
+- Startup error about missing keys:
+  - Verify `.env` values or Key Vault secrets
+  - Ensure required secret names match expected names in `config.py`
+- FFmpeg-related processing failures:
+  - Ensure FFmpeg is installed and available on PATH
+- Azure auth issues in cloud:
+  - Confirm managed identity has access to Key Vault and service resources
 
-For issues or questions, contact the system administrator.
+---
+
+## Related Docs
+
+- Infrastructure guide: `infrastructure/README.md`
+- Main app entrypoint: `app.py`
+- Central configuration: `config.py`
