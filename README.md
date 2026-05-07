@@ -2,7 +2,7 @@
 
 Azure-powered transcription and AI summarization web application, built with Gradio and secured with Azure Key Vault.
 
-Current app version in code: `0.1.39` (from `app.py`).
+Current app version in code: `0.1.40` (from `app.py`).
 
 ---
 

@@ -976,106 +976,257 @@ def allowed_file(filename):
     return ext in supported_extensions
 
 class AudioConverter:
-    """Convert audio/video files to WAV format for Azure Speech Service"""
-    
+    """Convert any audio or video file to 16 kHz mono 16-bit PCM WAV for Azure STT.
+
+    Strategy
+    --------
+    Each conversion runs up to three FFmpeg passes, each progressively more
+    aggressive, so that every supported container/codec family completes
+    successfully:
+
+    Pass 1 — format-aware flags
+        Applies a base set of safe recovery flags PLUS container-family extras
+        (e.g. +genpts for MPEG-TS, large analyzeduration for QuickTime/M4A,
+        muxing queue for MKV/WEBM, index rebuild for AVI).
+
+    Pass 2 — nuclear recovery
+        Adds -ignore_unknown, -max_interleave_delta 0, -vsync 0 and forces the
+        audio codec to pcm_s16le so any exotic codec path is bypassed.
+
+    Pass 3 — copy-then-reencode
+        Extracts the raw audio stream with '-acodec copy' into a temp WAV,
+        then re-encodes that to the target PCM spec.  Handles containers where
+        the demuxer refuses to decode but can copy frames (e.g. some RMVB,
+        broken FLV).
+
+    Output validation
+        After every pass the output file is checked for a valid RIFF/WAVE
+        header and minimum size before being accepted.  An empty or corrupt
+        output triggers the next pass (not a silent success).
+    """
+
+    TARGET_SAMPLE_RATE = 16000
+    TARGET_CHANNELS = 1
+    # Anything ≤ 44 bytes is just a WAV header with no audio data.
+    _MIN_WAV_BYTES = 100
+
+    # ------------------------------------------------------------------ #
+    # Container-family flag tables                                         #
+    # ------------------------------------------------------------------ #
+
+    # Flags added BEFORE -i for every pass (safe for all formats).
+    _BASE_PRE_INPUT = [
+        '-fflags', '+discardcorrupt',
+        '-err_detect', 'ignore_err',
+        # Give FFmpeg plenty of runway to locate streams in files where
+        # the index/moov atom lives at the END (M4A, MP4, MOV, 3GP …).
+        '-analyzeduration', '200M',
+        '-probesize', '200M',
+    ]
+
+    # Output flags shared by all passes.
+    _BASE_OUTPUT = [
+        '-vn',              # strip all video streams
+        '-sn',              # strip subtitle streams
+        '-dn',              # strip data streams
+        '-acodec', 'pcm_s16le',
+        '-ar', str(TARGET_SAMPLE_RATE),
+        '-ac', str(TARGET_CHANNELS),
+        '-y',
+    ]
+
+    # Per-family EXTRA pre-input flags appended on Pass 1.
+    # Each entry: (frozenset_of_extensions, extra_flags_list)
+    _FAMILY_PRE_INPUT: List[Tuple[frozenset, List[str]]] = [
+        # MPEG transport streams — must regenerate PTS or demuxer stalls.
+        (frozenset({'ts', 'mts', 'm2ts', 'mpg', 'mpeg', 'vob'}),
+         ['-fflags', '+genpts']),
+        # AVI — rebuild broken/missing index so every frame is reachable.
+        (frozenset({'avi'}),
+         ['-fflags', '+genpts+discardcorrupt', '-use_wallclock_as_timestamps', '1']),
+        # MKV / WEBM — high-bitrate video can overflow the muxing queue.
+        (frozenset({'mkv', 'webm'}),
+         ['-max_muxing_queue_size', '9999']),
+        # Windows Media — may carry DRM headers; discard-corrupt is enough.
+        (frozenset({'wma', 'wmv', 'asf'}),
+         ['-fflags', '+discardcorrupt']),
+        # Flash / RealMedia — notoriously non-standard containers.
+        (frozenset({'flv', 'f4v', 'rm', 'rmvb'}),
+         ['-fflags', '+discardcorrupt+genpts']),
+    ]
+
+    # Per-family EXTRA output flags appended on Pass 1.
+    _FAMILY_OUTPUT: List[Tuple[frozenset, List[str]]] = [
+        # AMR (narrowband/wideband) — let FFmpeg resample freely.
+        (frozenset({'amr', 'awb'}),
+         ['-af', 'aresample=resampler=soxr']),
+        # Opus inside OGG can have variable packet durations; pad to 20 ms.
+        (frozenset({'opus', 'ogg'}),
+         ['-af', 'aresample=resampler=soxr']),
+    ]
+
     def __init__(self):
         self.target_format = 'wav'
-        self.target_sample_rate = 16000  # 16kHz is optimal for speech recognition
-        self.target_channels = 1  # Mono
-        
+        self.target_sample_rate = self.TARGET_SAMPLE_RATE
+        self.target_channels = self.TARGET_CHANNELS
+
+    # ------------------------------------------------------------------ #
+    # Public API                                                           #
+    # ------------------------------------------------------------------ #
+
     def convert_to_wav(self, input_file: bytes, original_filename: str) -> Tuple[bytes, str]:
+        """Convert *input_file* bytes to 16 kHz mono PCM WAV.
+
+        Returns ``(wav_bytes, None)`` on success or ``(None, error_str)`` on
+        total failure (all three passes exhausted).
         """
-        Convert any audio/video file to WAV format using FFmpeg
-        
-        Args:
-            input_file: Input file bytes
-            original_filename: Original filename for extension detection
-            
-        Returns:
-            Tuple of (wav_bytes, error_message)
-        """
-        temp_input = None
-        temp_output = None
-        
+        temp_input = temp_output = temp_copy = None
+        ext = os.path.splitext(original_filename)[1].lower() or '.tmp'
+        fname = os.path.basename(original_filename)
+
         try:
-            # Get input file extension
-            input_ext = os.path.splitext(original_filename)[1].lower()
-            if not input_ext:
-                input_ext = '.tmp'
-            
-            # Create temporary input file
-            with tempfile.NamedTemporaryFile(suffix=input_ext, delete=False) as f:
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
                 temp_input = f.name
                 f.write(input_file)
-            
-            # Create temporary output file
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 temp_output = f.name
-            
-            # Build FFmpeg command
-            # -fflags +discardcorrupt: tolerate corrupt frames (critical for M4A/Apple files)
-            # -err_detect ignore_err: ignore non-fatal decoding errors so FFmpeg doesn't
-            #   stop early on malformed M4A containers (iPhone recordings, etc.)
-            # -i: input file
-            # -vn: no video (extract audio only from video files)
-            # -acodec pcm_s16le: 16-bit PCM encoding
-            # -ar 16000: 16kHz sample rate
-            # -ac 1: mono channel
-            # -y: overwrite output file
-            ffmpeg_cmd = [
-                'ffmpeg',
-                '-fflags', '+discardcorrupt',
-                '-err_detect', 'ignore_err',
-                '-i', temp_input,
-                '-vn',  # No video
-                '-acodec', 'pcm_s16le',  # 16-bit PCM
-                '-ar', str(self.target_sample_rate),  # Sample rate
-                '-ac', str(self.target_channels),  # Channels
-                '-y',  # Overwrite
-                temp_output
+
+            print(f"[CONV] Converting '{fname}' ({len(input_file)/1024/1024:.2f} MB, ext={ext}) → WAV")
+
+            raw_ext = ext.lstrip('.')
+
+            # ---- Pass 1: format-aware ----------------------------------------
+            pre  = self._BASE_PRE_INPUT + self._family_pre_input(raw_ext)
+            post = self._family_output(raw_ext) + self._BASE_OUTPUT
+            cmd1 = ['ffmpeg', *pre, '-i', temp_input, *post, temp_output]
+            ok, stderr1 = self._run_ffmpeg(cmd1, fname, pass_label="1/3 (format-aware)")
+            if ok and self._valid_wav(temp_output):
+                return self._read_wav(temp_output, fname)
+
+            # ---- Pass 2: nuclear recovery ------------------------------------
+            pre2 = self._BASE_PRE_INPUT + [
+                '-ignore_unknown',
+                '-max_interleave_delta', '0',
+                '-vsync', '0',
             ]
-            
-            print(f"🔄 Converting {original_filename} to WAV format...")
-            
-            # Run FFmpeg
+            post2 = self._BASE_OUTPUT  # No family extras — keep it simple.
+            cmd2 = ['ffmpeg', *pre2, '-i', temp_input, *post2, temp_output]
+            ok, stderr2 = self._run_ffmpeg(cmd2, fname, pass_label="2/3 (nuclear recovery)")
+            if ok and self._valid_wav(temp_output):
+                return self._read_wav(temp_output, fname)
+
+            # ---- Pass 3: copy-then-reencode ----------------------------------
+            # Extract raw audio stream unchanged, then re-encode from that.
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                temp_copy = f.name
+            cmd3a = ['ffmpeg', *self._BASE_PRE_INPUT, '-i', temp_input,
+                     '-vn', '-sn', '-dn', '-acodec', 'copy', '-y', temp_copy]
+            ok3a, _ = self._run_ffmpeg(cmd3a, fname, pass_label="3/3a (stream copy)")
+            if ok3a and os.path.exists(temp_copy) and os.path.getsize(temp_copy) > self._MIN_WAV_BYTES:
+                cmd3b = ['ffmpeg', *self._BASE_PRE_INPUT, '-i', temp_copy,
+                         '-acodec', 'pcm_s16le',
+                         '-ar', str(self.TARGET_SAMPLE_RATE),
+                         '-ac', str(self.TARGET_CHANNELS),
+                         '-y', temp_output]
+                ok3b, stderr3b = self._run_ffmpeg(cmd3b, fname, pass_label="3/3b (reencode copy)")
+                if ok3b and self._valid_wav(temp_output):
+                    return self._read_wav(temp_output, fname)
+
+            # All passes failed — compile a useful error.
+            error_detail = (
+                f"All 3 FFmpeg passes failed for '{fname}'.\n"
+                f"Pass-1 stderr: {stderr1[-500:] if stderr1 else 'n/a'}\n"
+                f"Pass-2 stderr: {stderr2[-500:] if stderr2 else 'n/a'}"
+            )
+            print(f"[ERROR] [CONV] {error_detail}")
+            return None, f"Audio/video conversion failed for '{fname}' — see server logs for FFmpeg details."
+
+        except subprocess.TimeoutExpired:
+            msg = f"Conversion timed out for '{fname}' (file may be too large or corrupt)"
+            print(f"[ERROR] [CONV] {msg}")
+            return None, msg
+        except Exception as exc:
+            msg = f"Unexpected conversion error for '{fname}': {exc}"
+            print(f"[ERROR] [CONV] {msg}")
+            return None, msg
+        finally:
+            for path in (temp_input, temp_output, temp_copy):
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _family_pre_input(self, ext: str) -> List[str]:
+        """Return extra pre-input flags for the given file extension."""
+        for extensions, flags in self._FAMILY_PRE_INPUT:
+            if ext in extensions:
+                return flags
+        return []
+
+    def _family_output(self, ext: str) -> List[str]:
+        """Return extra output flags for the given file extension."""
+        for extensions, flags in self._FAMILY_OUTPUT:
+            if ext in extensions:
+                return flags
+        return []
+
+    @staticmethod
+    def _run_ffmpeg(cmd: List[str], fname: str, pass_label: str) -> Tuple[bool, str]:
+        """Run an FFmpeg command; return (success, stderr_text)."""
+        print(f"[CONV] [{fname}] Pass {pass_label}: {' '.join(cmd[:8])} ...")
+        try:
             result = subprocess.run(  # nosec B603 - fixed argv, no shell
-                ffmpeg_cmd,
+                cmd,
                 capture_output=True,
                 text=True,
-                timeout=1800,  # 30 minute timeout
+                timeout=1800,
                 check=False,
             )
-            
-            if result.returncode != 0:
-                error_msg = f"FFmpeg conversion failed: {result.stderr}"
-                print(f"[ERROR] {error_msg}")
-                return None, error_msg
-            
-            # Read converted WAV file
-            if not os.path.exists(temp_output):
-                return None, "Conversion succeeded but output file not found"
-            
-            with open(temp_output, 'rb') as f:
-                wav_bytes = f.read()
-            
-            file_size = len(wav_bytes)
-            print(f"[OK] Converted to WAV: {file_size / 1024 / 1024:.2f} MB")
-            
-            return wav_bytes, None
-            
+            if result.returncode == 0:
+                print(f"[CONV] [{fname}] Pass {pass_label}: SUCCESS (rc=0)")
+                return True, result.stderr
+            print(
+                f"[CONV] [{fname}] Pass {pass_label}: FAILED (rc={result.returncode})\n"
+                f"  stderr tail: {result.stderr[-300:]}"
+            )
+            return False, result.stderr
         except subprocess.TimeoutExpired:
-            return None, "Audio conversion timed out (file too large or complex)"
-        except Exception as e:
-            return None, f"Audio conversion error: {str(e)}"
-        finally:
-            # Clean up temporary files
-            try:
-                if temp_input and os.path.exists(temp_input):
-                    os.remove(temp_input)
-                if temp_output and os.path.exists(temp_output):
-                    os.remove(temp_output)
-            except Exception:
-                pass
+            raise
+        except Exception as exc:
+            print(f"[CONV] [{fname}] Pass {pass_label}: EXCEPTION — {exc}")
+            return False, str(exc)
+
+    def _valid_wav(self, path: str) -> bool:
+        """Return True if *path* exists, has a valid RIFF/WAVE header, and
+        contains actual audio data beyond the 44-byte header."""
+        try:
+            if not os.path.exists(path):
+                return False
+            size = os.path.getsize(path)
+            if size <= self._MIN_WAV_BYTES:
+                print(f"[CONV] Output WAV too small ({size} bytes) — treating as failed")
+                return False
+            with open(path, 'rb') as f:
+                header = f.read(12)
+            if header[:4] != b'RIFF' or header[8:12] != b'WAVE':
+                print(f"[CONV] Output file is not a valid WAV (header={header[:12]!r})")
+                return False
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _read_wav(path: str, fname: str) -> Tuple[bytes, None]:
+        """Read WAV bytes from disk and print size info."""
+        with open(path, 'rb') as f:
+            data = f.read()
+        print(f"[CONV] '{fname}' → WAV: {len(data)/1024/1024:.2f} MB")
+        return data, None
     
     def get_audio_info(self, file_bytes: bytes, filename: str) -> Optional[Dict]:
         """Get audio file information using FFprobe"""
