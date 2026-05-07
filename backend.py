@@ -1013,6 +1013,9 @@ class AudioConverter:
                 temp_output = f.name
             
             # Build FFmpeg command
+            # -fflags +discardcorrupt: tolerate corrupt frames (critical for M4A/Apple files)
+            # -err_detect ignore_err: ignore non-fatal decoding errors so FFmpeg doesn't
+            #   stop early on malformed M4A containers (iPhone recordings, etc.)
             # -i: input file
             # -vn: no video (extract audio only from video files)
             # -acodec pcm_s16le: 16-bit PCM encoding
@@ -1021,6 +1024,8 @@ class AudioConverter:
             # -y: overwrite output file
             ffmpeg_cmd = [
                 'ffmpeg',
+                '-fflags', '+discardcorrupt',
+                '-err_detect', 'ignore_err',
                 '-i', temp_input,
                 '-vn',  # No video
                 '-acodec', 'pcm_s16le',  # 16-bit PCM
@@ -1488,35 +1493,75 @@ class TranscriptionManager:
             return None
     
     def _process_succeeded_transcription(self, job, job_id, user_id):
-        """Handle a succeeded Azure STT transcription — fetch, save, and mark completed."""
-        content_url = self._get_transcription_result_url(job.azure_trans_id)
-        if not content_url:
+        """Handle a succeeded Azure STT transcription — fetch, save, and mark completed.
+
+        Key improvements over the original:
+        - Uses _get_transcription_result_urls (paginated, all files)
+        - Concatenates multiple result segments (e.g. multi-channel audio)
+        - Fails the job explicitly instead of completing with an empty transcript
+        """
+        content_urls = self._get_transcription_result_urls(job.azure_trans_id)
+        if not content_urls:
+            job.status = "failed"
+            job.error_message = (
+                "Azure STT reported Succeeded but returned no Transcription files. "
+                "The audio may be too short, completely silent, or the result URL "
+                "could not be retrieved."
+            )
+            job.completed_at = datetime.now().isoformat()
+            self.blob_storage.save_transcription_job(job)
+            print(f"[ERROR] [{user_id[:8]}...] No transcription result URLs for {job.original_filename}")
             return
-        
+
         settings = job.settings if job.settings else {}
-        transcript = self._fetch_transcript(
-            content_url,
-            settings.get('diarization_enabled', False),
-            settings.get('timestamps', False),
-            settings.get('profanity', 'masked')
-        )
-        
-        settings['azure_stt_transcript_length'] = len(transcript) if transcript else 0
+        diarization = settings.get('diarization_enabled', False)
+        timestamps = settings.get('timestamps', False)
+        profanity = settings.get('profanity', 'masked')
+
+        # Fetch every result segment and concatenate into one transcript.
+        # For mono audio (which we always produce) there is usually exactly one
+        # file.  For stereo or multi-channel sources Azure returns one file per
+        # channel — we join them all so nothing is dropped.
+        all_segments: List[str] = []
+        for url in content_urls:
+            segment = self._fetch_transcript(url, diarization, timestamps, profanity)
+            if segment and segment not in ("No transcript available", "Error formatting transcript"):
+                all_segments.append(segment)
+
+        transcript = "\n\n".join(all_segments) if all_segments else ""
+
+        if not transcript:
+            job.status = "failed"
+            job.error_message = (
+                "Transcription result was empty. The audio may be silent, "
+                "contain no recognisable speech, or the result download failed "
+                "(check logs for timeout or network errors)."
+            )
+            job.completed_at = datetime.now().isoformat()
+            self.blob_storage.save_transcription_job(job)
+            print(f"[ERROR] [{user_id[:8]}...] Empty transcript for {job.original_filename}")
+            return
+
+        settings['azure_stt_transcript_length'] = len(transcript)
         settings['transcription_method'] = 'azure-stt'
-        
+        settings['transcription_segments'] = len(content_urls)
+
         transcript_url = self.blob_storage.upload_transcript_result(
             transcript, user_id, job_id,
             os.path.splitext(job.original_filename)[0] + "_transcript"
         )
-        
+
         job.status = "completed"
         job.transcript_text = transcript
         job.transcript_url = transcript_url
         job.completed_at = datetime.now().isoformat()
         job.settings = settings
         self.blob_storage.save_transcription_job(job)
-        
-        print(f"[{user_id[:8]}...] Azure STT completed: {job.original_filename}")
+
+        print(
+            f"[{user_id[:8]}...] Azure STT completed: {job.original_filename} "
+            f"({len(transcript):,} chars from {len(content_urls)} segment(s))"
+        )
     
     @staticmethod
     def _extract_error_message(data):
@@ -1533,9 +1578,13 @@ class TranscriptionManager:
             job = self.blob_storage.get_transcription_job(job_id, user_id)
             if not job or job.status != 'processing' or not job.azure_trans_id:
                 return
-            
-            url = f"{AZURE_SPEECH_KEY_ENDPOINT}/speechtotext/{API_VERSION}/transcriptions/{job.azure_trans_id}"
-            headers = {"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY}
+
+            # Use _resolve_speech_key() so backup key failover is consistent
+            # with _submit_to_azure — hardcoding the primary key here caused
+            # status polls to fail with 401 whenever the backup key was used.
+            speech_key, speech_endpoint = self._resolve_speech_key()
+            url = f"{speech_endpoint}/speechtotext/{API_VERSION}/transcriptions/{job.azure_trans_id}"
+            headers = {"Ocp-Apim-Subscription-Key": speech_key}
 
             r = requests.get(url, headers=headers, timeout=30)
             data = r.json()
@@ -1558,34 +1607,74 @@ class TranscriptionManager:
                 job.completed_at = datetime.now().isoformat()
                 self.blob_storage.save_transcription_job(job)
     
-    def _get_transcription_result_url(self, azure_trans_id: str) -> Optional[str]:
-        """Get transcription result URL from Azure"""
+    def _get_transcription_result_urls(self, azure_trans_id: str) -> List[str]:
+        """Get ALL transcription result content URLs from Azure, following pagination.
+
+        Azure's /files endpoint is paginated via @nextLink.  Earlier code only
+        fetched the first page and returned on the first match, which meant any
+        Transcription file on a subsequent page was silently missed.  This method
+        walks every page and collects every 'Transcription' file URL.
+        """
+        urls: List[str] = []
         try:
-            url = f"{AZURE_SPEECH_KEY_ENDPOINT}/speechtotext/{API_VERSION}/transcriptions/{azure_trans_id}/files"
-            headers = {"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY}
-            
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code == 200:
-                files = response.json().get('values', [])
-                for file in files:
-                    if file.get('kind') == 'Transcription':
-                        return file.get('links', {}).get('contentUrl')
-            return None
+            speech_key, speech_endpoint = self._resolve_speech_key()
+            next_url: Optional[str] = (
+                f"{speech_endpoint}/speechtotext/{API_VERSION}"
+                f"/transcriptions/{azure_trans_id}/files"
+            )
+            headers = {"Ocp-Apim-Subscription-Key": speech_key}
+
+            while next_url:
+                try:
+                    response = requests.get(next_url, headers=headers, timeout=30)
+                    if response.status_code != 200:
+                        print(
+                            f"[WARN] Transcription files page returned "
+                            f"{response.status_code}: {response.text[:200]}"
+                        )
+                        break
+                    data = response.json()
+                    for file in data.get('values', []):
+                        if file.get('kind') == 'Transcription':
+                            content_url = file.get('links', {}).get('contentUrl')
+                            if content_url:
+                                urls.append(content_url)
+                    next_url = data.get('@nextLink')
+                except Exception as page_err:
+                    print(f"[WARN] Error fetching transcription files page: {page_err}")
+                    break
         except Exception as e:
-            print(f"âŒ Error getting transcription result URL: {e}")
-            return None
-    
-    def _fetch_transcript(self, content_url: str, diarization_enabled: bool = False, 
-                        timestamps_enabled: bool = False, profanity_mode: str = 'masked') -> str:
-        """Fetch and format transcript"""
+            print(f"[ERROR] Error resolving speech key for result URLs: {e}")
+
+        if not urls:
+            print(f"[WARN] No Transcription files found for {azure_trans_id}")
+        else:
+            print(f"[INFO] Found {len(urls)} transcription result file(s) for {azure_trans_id[:8]}...")
+        return urls
+
+    def _fetch_transcript(self, content_url: str, diarization_enabled: bool = False,
+                          timestamps_enabled: bool = False, profanity_mode: str = 'masked') -> str:
+        """Fetch and format a single transcript result file from Azure.
+
+        Timeout raised to 300 s (5 min): long recordings produce large JSON
+        payloads (10 000+ recognizedPhrases) that easily exceed the previous
+        60-second limit, causing a JSONDecodeError that was silently swallowed
+        and returned as an empty string.
+        """
         try:
-            response = requests.get(content_url, timeout=60)
+            response = requests.get(content_url, timeout=300)
             if response.status_code == 200:
                 data = response.json()
-                return self._format_transcript(data, diarization_enabled, timestamps_enabled, profanity_mode)
+                return self._format_transcript(
+                    data, diarization_enabled, timestamps_enabled, profanity_mode
+                )
+            print(
+                f"[WARN] Transcript content URL returned HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
             return ""
         except Exception as e:
-            print(f"âŒ Error fetching transcript: {e}")
+            print(f"[ERROR] Error fetching transcript (timeout or network error): {e}")
             return ""
     
     def _get_timestamp_str(self, phrase):
