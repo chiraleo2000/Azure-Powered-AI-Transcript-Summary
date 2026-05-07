@@ -1015,8 +1015,13 @@ class AudioConverter:
     # ------------------------------------------------------------------ #
 
     # Flags added BEFORE -i for every pass (safe for all formats).
+    # NOTE: +discardcorrupt is intentionally EXCLUDED from the base flags.
+    # For encoded codecs (AAC/M4A, MP3, OGG, …) one mis-flagged packet causes
+    # the decoder to lose sync, so ALL subsequent packets are also dropped —
+    # producing a silent hard cut.  Pass 1 and 2 convert without discarding;
+    # only the desperate Pass-3 copy step uses it.  Formats that genuinely
+    # carry corruption (TS, AVI, FLV) get +discardcorrupt via family flags.
     _BASE_PRE_INPUT = [
-        '-fflags', '+discardcorrupt',
         '-err_detect', 'ignore_err',
         # Give FFmpeg plenty of runway to locate streams in files where
         # the index/moov atom lives at the END (M4A, MP4, MOV, 3GP …).
@@ -1039,8 +1044,10 @@ class AudioConverter:
     # Each entry: (frozenset_of_extensions, extra_flags_list)
     _FAMILY_PRE_INPUT: List[Tuple[frozenset, List[str]]] = [
         # MPEG transport streams — must regenerate PTS or demuxer stalls.
+        # TS broadcast streams regularly carry real corrupt packets, so we also
+        # discard them here (unlike the base flags which no longer set this).
         (frozenset({'ts', 'mts', 'm2ts', 'mpg', 'mpeg', 'vob'}),
-         ['-fflags', '+genpts']),
+         ['-fflags', '+genpts+discardcorrupt']),
         # AVI — rebuild broken/missing index so every frame is reachable.
         (frozenset({'avi'}),
          ['-fflags', '+genpts+discardcorrupt', '-use_wallclock_as_timestamps', '1']),
@@ -1095,12 +1102,18 @@ class AudioConverter:
 
             raw_ext = ext.lstrip('.')
 
+            # Probe the original file duration upfront so we can detect
+            # silent truncation in each pass output.
+            orig_duration = self._probe_duration(temp_input)
+            if orig_duration > 0:
+                print(f"[CONV] [{fname}] Original duration: {orig_duration:.1f}s")
+
             # ---- Pass 1: format-aware ----------------------------------------
             pre  = self._BASE_PRE_INPUT + self._family_pre_input(raw_ext)
             post = self._family_output(raw_ext) + self._BASE_OUTPUT
             cmd1 = ['ffmpeg', *pre, '-i', temp_input, *post, temp_output]
             ok, stderr1 = self._run_ffmpeg(cmd1, fname, pass_label="1/3 (format-aware)")
-            if ok and self._valid_wav(temp_output):
+            if ok and self._valid_wav(temp_output) and self._duration_ok(temp_output, orig_duration, fname):
                 return self._read_wav(temp_output, fname)
 
             # ---- Pass 2: nuclear recovery ------------------------------------
@@ -1112,14 +1125,18 @@ class AudioConverter:
             post2 = self._BASE_OUTPUT  # No family extras — keep it simple.
             cmd2 = ['ffmpeg', *pre2, '-i', temp_input, *post2, temp_output]
             ok, stderr2 = self._run_ffmpeg(cmd2, fname, pass_label="2/3 (nuclear recovery)")
-            if ok and self._valid_wav(temp_output):
+            if ok and self._valid_wav(temp_output) and self._duration_ok(temp_output, orig_duration, fname):
                 return self._read_wav(temp_output, fname)
 
             # ---- Pass 3: copy-then-reencode ----------------------------------
             # Extract raw audio stream unchanged, then re-encode from that.
+            # This pass deliberately uses +discardcorrupt on the copy step so
+            # that even packets with an error flag in the container are copied
+            # (we are copying raw bytes, not decoding, so sync loss is not a risk).
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 temp_copy = f.name
-            cmd3a = ['ffmpeg', *self._BASE_PRE_INPUT, '-i', temp_input,
+            _pass3_pre = self._BASE_PRE_INPUT + ['-fflags', '+discardcorrupt']
+            cmd3a = ['ffmpeg', *_pass3_pre, '-i', temp_input,
                      '-vn', '-sn', '-dn', '-acodec', 'copy', '-y', temp_copy]
             ok3a, _ = self._run_ffmpeg(cmd3a, fname, pass_label="3/3a (stream copy)")
             if ok3a and os.path.exists(temp_copy) and os.path.getsize(temp_copy) > self._MIN_WAV_BYTES:
@@ -1128,8 +1145,13 @@ class AudioConverter:
                          '-ar', str(self.TARGET_SAMPLE_RATE),
                          '-ac', str(self.TARGET_CHANNELS),
                          '-y', temp_output]
-                ok3b, stderr3b = self._run_ffmpeg(cmd3b, fname, pass_label="3/3b (reencode copy)")
+                ok3b, _ = self._run_ffmpeg(cmd3b, fname, pass_label="3/3b (reencode copy)")
                 if ok3b and self._valid_wav(temp_output):
+                    # Accept Pass 3 result even if duration check fails —
+                    # this is already our last resort attempt.
+                    if not self._duration_ok(temp_output, orig_duration, fname):
+                        print(f"[WARN] [{fname}] Pass 3 also produced incomplete audio; "
+                              f"using best available output anyway")
                     return self._read_wav(temp_output, fname)
 
             # All passes failed — compile a useful error.
@@ -1227,7 +1249,49 @@ class AudioConverter:
             data = f.read()
         print(f"[CONV] '{fname}' → WAV: {len(data)/1024/1024:.2f} MB")
         return data, None
-    
+
+    @staticmethod
+    def _probe_duration(path: str) -> float:
+        """Return audio duration in seconds via FFprobe, or 0.0 on failure."""
+        try:
+            result = subprocess.run(  # nosec B603 - fixed argv, no shell
+                ['ffprobe', '-v', 'error',
+                 '-show_entries', 'format=duration',
+                 '-of', 'default=noprint_wrappers=1:nokey=1',
+                 path],
+                capture_output=True, text=True, timeout=30, check=False
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return float(result.stdout.strip())
+        except Exception:
+            pass
+        return 0.0
+
+    def _duration_ok(self, wav_path: str, orig_duration: float, fname: str) -> bool:
+        """Return True when the converted WAV duration is >= 90 % of the original.
+
+        A large discrepancy means FFmpeg silently dropped audio (e.g. due to
+        codec sync loss after +discardcorrupt discards a packet).  Returning
+        False here causes convert_to_wav to fall through to the next pass.
+        If we cannot determine the original or WAV duration we conservatively
+        return True to avoid falsely rejecting a good conversion.
+        """
+        if orig_duration <= 0:
+            return True  # can't verify without original duration
+        wav_duration = self._probe_duration(wav_path)
+        if wav_duration <= 0:
+            return True  # can't verify WAV duration either; trust _valid_wav
+        ratio = wav_duration / orig_duration
+        if ratio < 0.90:
+            print(
+                f"[WARN] [{fname}] Duration mismatch: "
+                f"original={orig_duration:.1f}s, wav={wav_duration:.1f}s "
+                f"({ratio:.1%}) — likely incomplete conversion, trying next pass"
+            )
+            return False
+        print(f"[CONV] [{fname}] Duration OK: {wav_duration:.1f}s / {orig_duration:.1f}s ({ratio:.1%})")
+        return True
+
     def get_audio_info(self, file_bytes: bytes, filename: str) -> Optional[Dict]:
         """Get audio file information using FFprobe"""
         temp_file = None
